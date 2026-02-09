@@ -17,12 +17,19 @@ const redis = new Redis({
   token: process.env.KV_REST_API_TOKEN,
 });
 
-// In-memory state (backed by Redis)
+// Keys for Redis persistence
+const REDIS_KEYS = {
+  PENDING_DELETES: 's4s:pending-deletes',
+  ROTATION_STATE: 's4s:rotation-state',
+  SCHEDULE: 's4s:schedule',
+};
+
+// In-memory state
 let isRunning = false;
 let rotationState = {
-  lastTagTime: {},      // { modelUsername: timestamp }
-  pendingDeletes: [],   // { postId, account, deleteAt }
-  dailySchedule: {},    // { modelUsername: [{ targetUsername, scheduledTime }] }
+  lastTagTime: {},
+  executedTags: [],
+  dailySchedule: {},
   stats: {
     totalTags: 0,
     totalDeletes: 0,
@@ -49,11 +56,76 @@ const GHOST_CAPTIONS = [
   "heart eyes for @{target} 😍",
 ];
 
+// === REDIS-BACKED PENDING DELETES ===
+
+async function addPendingDelete(postId, accountId, promoter, target) {
+  const deleteAt = Date.now() + 5 * 60 * 1000; // 5 minutes
+  const entry = { postId, accountId, promoter, target, deleteAt, createdAt: Date.now() };
+  
+  // Persist to Redis IMMEDIATELY
+  try {
+    const existing = await redis.get(REDIS_KEYS.PENDING_DELETES) || [];
+    existing.push(entry);
+    await redis.set(REDIS_KEYS.PENDING_DELETES, existing);
+    console.log(`📌 Persisted pending delete: ${postId} (deletes at ${new Date(deleteAt).toISOString()})`);
+    return entry;
+  } catch (e) {
+    console.error('❌ CRITICAL: Failed to persist pending delete:', e);
+    // Still return entry for in-memory backup
+    return entry;
+  }
+}
+
+async function getPendingDeletes() {
+  try {
+    return await redis.get(REDIS_KEYS.PENDING_DELETES) || [];
+  } catch (e) {
+    console.error('Failed to get pending deletes:', e);
+    return [];
+  }
+}
+
+async function removePendingDelete(postId) {
+  try {
+    const pending = await redis.get(REDIS_KEYS.PENDING_DELETES) || [];
+    const updated = pending.filter(p => p.postId !== postId);
+    await redis.set(REDIS_KEYS.PENDING_DELETES, updated);
+    return true;
+  } catch (e) {
+    console.error('Failed to remove pending delete:', e);
+    return false;
+  }
+}
+
+async function processOverdueDeletes() {
+  const now = Date.now();
+  const pending = await getPendingDeletes();
+  let processed = 0;
+  
+  for (const del of pending) {
+    if (now >= del.deleteAt) {
+      console.log(`🗑️ Processing overdue delete: ${del.postId} (was due ${Math.round((now - del.deleteAt) / 1000)}s ago)`);
+      const success = await deletePost(del.postId, del.accountId);
+      if (success) {
+        await removePendingDelete(del.postId);
+        rotationState.stats.totalDeletes++;
+        processed++;
+      }
+    }
+  }
+  
+  if (processed > 0) {
+    console.log(`✅ Processed ${processed} overdue deletes`);
+  }
+  return processed;
+}
+
 // === CORE FUNCTIONS ===
 
 async function loadVaultMappings() {
   try {
-    const data = await redis.get('s4s:vault-mappings');
+    const data = await redis.get('vault_mappings');
+    console.log('Loaded vault mappings:', Object.keys(data || {}).length, 'models');
     return data || {};
   } catch (e) {
     console.error('Failed to load vault mappings:', e);
@@ -63,13 +135,11 @@ async function loadVaultMappings() {
 
 async function loadModelAccounts() {
   try {
-    // Fetch accounts from OF API
     const res = await fetch(`${OF_API_BASE}/accounts`, {
       headers: { 'Authorization': `Bearer ${OF_API_KEY}` }
     });
     const accounts = await res.json();
     
-    // Map username to account ID
     const accountMap = {};
     for (const acct of accounts) {
       if (acct.onlyfans_username) {
@@ -85,28 +155,22 @@ async function loadModelAccounts() {
 
 function generateDailySchedule(models, vaultMappings) {
   const schedule = {};
-  const now = new Date();
-  const startOfDay = new Date(now.getFullYear(), now.getMonth(), now.getDate());
+  const now = Date.now();
   
   for (const model of models) {
     const targets = Object.keys(vaultMappings[model] || {});
     if (targets.length === 0) continue;
     
-    // Shuffle targets for randomization
     const shuffledTargets = [...targets].sort(() => Math.random() - 0.5);
-    
-    // 56 tags per day = one every ~25.7 minutes
-    // Spread across 24 hours with some randomness
     const tagsPerDay = 56;
-    const baseInterval = (24 * 60) / tagsPerDay; // ~25.7 min
+    const baseInterval = 25.7 * 60 * 1000;
     
     schedule[model] = [];
-    let currentTime = startOfDay.getTime() + Math.random() * 10 * 60 * 1000; // Random start within first 10 min
+    let currentTime = now + (1 + Math.random() * 4) * 60 * 1000;
     
     for (let i = 0; i < tagsPerDay; i++) {
       const target = shuffledTargets[i % shuffledTargets.length];
-      // Add randomness: ±5 minutes
-      const jitter = (Math.random() - 0.5) * 10 * 60 * 1000;
+      const jitter = (Math.random() - 0.5) * 6 * 60 * 1000;
       const scheduledTime = currentTime + jitter;
       
       schedule[model].push({
@@ -115,10 +179,11 @@ function generateDailySchedule(models, vaultMappings) {
         executed: false,
       });
       
-      currentTime += baseInterval * 60 * 1000;
+      currentTime += baseInterval;
     }
   }
   
+  console.log(`📅 Generated schedule for ${models.length} models, starting from now`);
   return schedule;
 }
 
@@ -171,7 +236,8 @@ async function deletePost(postId, accountId) {
       console.log(`🗑️ Deleted post ${postId}`);
       return true;
     } else {
-      console.error(`Failed to delete post ${postId}`);
+      const err = await res.text();
+      console.error(`Failed to delete post ${postId}:`, err);
       return false;
     }
   } catch (e) {
@@ -189,16 +255,19 @@ async function runRotationCycle() {
   const vaultMappings = await loadVaultMappings();
   const accountMap = await loadModelAccounts();
   
-  // Process pending deletes first
-  const pendingDeletes = [...rotationState.pendingDeletes];
-  rotationState.pendingDeletes = [];
+  // ALWAYS process pending deletes first (from Redis)
+  const pending = await getPendingDeletes();
   
-  for (const del of pendingDeletes) {
+  for (const del of pending) {
     if (now >= del.deleteAt) {
-      await deletePost(del.postId, del.account);
-      rotationState.stats.totalDeletes++;
-    } else {
-      rotationState.pendingDeletes.push(del);
+      const success = await deletePost(del.postId, del.accountId);
+      if (success) {
+        await removePendingDelete(del.postId);
+        rotationState.stats.totalDeletes++;
+        // Update executedTags status
+        const tag = rotationState.executedTags.find(t => t.postId === del.postId);
+        if (tag) tag.status = 'deleted';
+      }
     }
   }
   
@@ -211,7 +280,6 @@ async function runRotationCycle() {
       if (sched.executed) continue;
       if (now < sched.scheduledTime) continue;
       
-      // Execute the tag
       const vaultId = vaultMappings[model]?.[sched.target];
       if (!vaultId) {
         console.log(`⚠️ No vault ID for ${model} → ${sched.target}`);
@@ -223,28 +291,47 @@ async function runRotationCycle() {
       sched.executed = true;
       
       if (postId) {
-        // Schedule deletion in 5 minutes
-        rotationState.pendingDeletes.push({
+        // Track executed tag
+        rotationState.executedTags.push({
           postId,
-          account: accountId,
-          deleteAt: now + 5 * 60 * 1000,
+          promoter: model,
+          target: sched.target,
+          createdAt: now,
+          status: 'active'
         });
+        if (rotationState.executedTags.length > 50) {
+          rotationState.executedTags = rotationState.executedTags.slice(-50);
+        }
+        
+        // PERSIST pending delete to Redis immediately
+        await addPendingDelete(postId, accountId, model, sched.target);
         rotationState.stats.totalTags++;
       }
       
-      // Small delay between posts to avoid rate limits
+      // Rate limit protection
       await new Promise(r => setTimeout(r, 2000));
     }
   }
-  
-  // Save state to Redis
-  await redis.set('s4s:rotation-state', JSON.stringify(rotationState));
 }
 
 // === SCHEDULING ===
 
 // Run rotation cycle every minute
 cron.schedule('* * * * *', runRotationCycle);
+
+// Also run delete check every 30 seconds for faster cleanup
+cron.schedule('*/30 * * * * *', async () => {
+  if (!isRunning) return;
+  
+  const pending = await getPendingDeletes();
+  const now = Date.now();
+  const overdue = pending.filter(p => now >= p.deleteAt);
+  
+  if (overdue.length > 0) {
+    console.log(`⏰ Found ${overdue.length} overdue deletes, processing...`);
+    await processOverdueDeletes();
+  }
+});
 
 // Regenerate daily schedule at midnight
 cron.schedule('0 0 * * *', async () => {
@@ -253,8 +340,30 @@ cron.schedule('0 0 * * *', async () => {
   const vaultMappings = await loadVaultMappings();
   const models = Object.keys(vaultMappings);
   rotationState.dailySchedule = generateDailySchedule(models, vaultMappings);
-  console.log(`📅 New schedule generated for ${models.length} models`);
 });
+
+// === STARTUP RECOVERY ===
+
+async function startupRecovery() {
+  console.log('🔧 Running startup recovery...');
+  
+  // Check for any pending deletes that should have been processed
+  const overdue = await processOverdueDeletes();
+  console.log(`   Recovered ${overdue} overdue deletes`);
+  
+  // Load previous state if exists
+  try {
+    const savedState = await redis.get(REDIS_KEYS.ROTATION_STATE);
+    if (savedState) {
+      rotationState.stats = savedState.stats || rotationState.stats;
+      console.log(`   Restored stats: ${rotationState.stats.totalTags} tags, ${rotationState.stats.totalDeletes} deletes`);
+    }
+  } catch (e) {
+    console.log('   No previous state found');
+  }
+  
+  console.log('✅ Startup recovery complete');
+}
 
 // === API ENDPOINTS ===
 
@@ -263,7 +372,6 @@ app.get('/', (req, res) => {
     service: 'S4S Rotation Service',
     status: isRunning ? 'running' : 'stopped',
     stats: rotationState.stats,
-    pendingDeletes: rotationState.pendingDeletes.length,
   });
 });
 
@@ -275,6 +383,9 @@ app.post('/start', async (req, res) => {
   console.log('🚀 Starting rotation service...');
   isRunning = true;
   rotationState.stats.startedAt = new Date().toISOString();
+  
+  // Process any overdue deletes first
+  await processOverdueDeletes();
   
   // Generate initial schedule
   const vaultMappings = await loadVaultMappings();
@@ -294,13 +405,40 @@ app.post('/stop', async (req, res) => {
   console.log('⏹️ Stopping rotation service...');
   isRunning = false;
   
-  // Process remaining deletes
-  for (const del of rotationState.pendingDeletes) {
-    await deletePost(del.postId, del.account);
-  }
-  rotationState.pendingDeletes = [];
+  // Process all remaining deletes before stopping
+  console.log('🗑️ Cleaning up pending deletes...');
+  const pending = await getPendingDeletes();
   
-  res.json({ status: 'stopped' });
+  for (const del of pending) {
+    await deletePost(del.postId, del.accountId);
+    await removePendingDelete(del.postId);
+    rotationState.stats.totalDeletes++;
+  }
+  
+  console.log(`   Deleted ${pending.length} remaining posts`);
+  
+  res.json({ status: 'stopped', cleaned: pending.length });
+});
+
+// Receive schedule from app (single source of truth)
+app.post('/schedule', async (req, res) => {
+  const { schedule } = req.body;
+  
+  if (!schedule) {
+    return res.status(400).json({ error: 'schedule required' });
+  }
+  
+  rotationState.dailySchedule = schedule;
+  await redis.set(REDIS_KEYS.SCHEDULE, schedule);
+  
+  const totalTags = Object.values(schedule).reduce((sum, s) => sum + s.length, 0);
+  console.log(`📅 Received schedule: ${Object.keys(schedule).length} models, ${totalTags} total tags`);
+  
+  res.json({ 
+    status: 'schedule updated',
+    models: Object.keys(schedule).length,
+    totalTags
+  });
 });
 
 app.get('/schedule', (req, res) => {
@@ -325,30 +463,79 @@ app.get('/schedule', (req, res) => {
   res.json({
     upcoming: upcoming.slice(0, 50),
     total: upcoming.length,
-    pendingDeletes: rotationState.pendingDeletes.length,
   });
 });
 
-app.get('/stats', (req, res) => {
+app.get('/stats', async (req, res) => {
+  const pending = await getPendingDeletes();
+  
   res.json({
     isRunning,
     stats: rotationState.stats,
     modelsActive: Object.keys(rotationState.dailySchedule).length,
-    pendingDeletes: rotationState.pendingDeletes.length,
+    pendingDeletes: pending.length,
+    pendingDeletesList: pending.map(p => ({
+      postId: p.postId,
+      promoter: p.promoter,
+      target: p.target,
+      deleteAt: new Date(p.deleteAt).toISOString(),
+      overdueBy: Math.max(0, Math.round((Date.now() - p.deleteAt) / 1000))
+    }))
   });
 });
 
-// Health check for Railway
+app.get('/active', async (req, res) => {
+  const pending = await getPendingDeletes();
+  const now = Date.now();
+  
+  const activeTags = pending.map(p => ({
+    promoter: p.promoter,
+    target: p.target,
+    postId: p.postId,
+    createdAt: new Date(p.createdAt).toISOString(),
+    ageSeconds: Math.round((now - p.createdAt) / 1000),
+    deletesIn: Math.max(0, Math.round((p.deleteAt - now) / 1000))
+  })).sort((a, b) => b.ageSeconds - a.ageSeconds);
+  
+  res.json({
+    count: activeTags.length,
+    tags: activeTags
+  });
+});
+
+// Force cleanup endpoint
+app.post('/cleanup', async (req, res) => {
+  console.log('🧹 Force cleanup triggered...');
+  const pending = await getPendingDeletes();
+  let cleaned = 0;
+  
+  for (const del of pending) {
+    const success = await deletePost(del.postId, del.accountId);
+    if (success) {
+      await removePendingDelete(del.postId);
+      cleaned++;
+    }
+  }
+  
+  res.json({ cleaned, message: `Deleted ${cleaned} posts` });
+});
+
 app.get('/health', (req, res) => {
   res.json({ ok: true, timestamp: new Date().toISOString() });
 });
 
 // === START SERVER ===
 
-app.listen(PORT, () => {
+app.listen(PORT, async () => {
   console.log(`🚀 S4S Rotation Service running on port ${PORT}`);
-  console.log(`   POST /start - Start rotation`);
-  console.log(`   POST /stop  - Stop rotation`);
-  console.log(`   GET /schedule - View upcoming tags`);
-  console.log(`   GET /stats - View statistics`);
+  console.log(`   POST /start    - Start rotation`);
+  console.log(`   POST /stop     - Stop rotation (cleans up)`);
+  console.log(`   POST /schedule - Receive schedule from app`);
+  console.log(`   POST /cleanup  - Force delete all pending`);
+  console.log(`   GET /schedule  - View upcoming tags`);
+  console.log(`   GET /stats     - View statistics`);
+  console.log(`   GET /active    - View active (undeleted) posts`);
+  
+  // Run startup recovery
+  await startupRecovery();
 });
