@@ -4,7 +4,7 @@ const cron = require('node-cron');
 const { Redis } = require('@upstash/redis');
 
 const app = express();
-app.use(express.json());
+app.use(express.json({ limit: '10mb' }));
 
 // Config
 const OF_API_KEY = process.env.OF_API_KEY;
