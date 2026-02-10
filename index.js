@@ -342,6 +342,191 @@ cron.schedule('0 0 * * *', async () => {
   rotationState.dailySchedule = generateDailySchedule(models, vaultMappings);
 });
 
+// === PINNED POST SYSTEM ===
+// 5 featured girls × 6 accounts each = 30 pinned posts/day
+// Created at 6am AST (10:00 UTC), expire after 24h via OF
+// Stopping rotation does NOT remove pinned posts
+
+const PINNED_REDIS_KEY = 's4s:pinned-state';
+const PINNED_FEATURED_PER_DAY = 5;
+const PINNED_ACCOUNTS_PER_GIRL = 6;
+
+const PINNED_CAPTIONS = [
+  "my girl 💕 go follow @{target} rn",
+  "she's literally perfect @{target} 🥰",
+  "everyone go subscribe to @{target} 💗",
+  "you're welcome 😍 @{target}",
+  "obsessed w her @{target} 🫶",
+  "bestie goals @{target} ✨",
+  "trust me, follow @{target} 💕",
+  "she's that girl @{target} 🔥",
+  "my fav human @{target} 💗",
+  "go show love to @{target} 🥹",
+];
+
+function getPinnedCaption(targetUsername) {
+  const template = PINNED_CAPTIONS[Math.floor(Math.random() * PINNED_CAPTIONS.length)];
+  return template.replace('{target}', targetUsername);
+}
+
+async function getPinnedState() {
+  try {
+    return await redis.get(PINNED_REDIS_KEY) || { dayIndex: 0, activePosts: [], lastRun: null };
+  } catch (e) {
+    return { dayIndex: 0, activePosts: [], lastRun: null };
+  }
+}
+
+async function savePinnedState(state) {
+  try {
+    await redis.set(PINNED_REDIS_KEY, state);
+  } catch (e) {
+    console.error('Failed to save pinned state:', e);
+  }
+}
+
+async function createPinnedPost(promoterAccountId, targetUsername, vaultId) {
+  const caption = getPinnedCaption(targetUsername);
+  
+  try {
+    const res = await fetch(`${OF_API_BASE}/${promoterAccountId}/posts`, {
+      method: 'POST',
+      headers: {
+        'Authorization': `Bearer ${OF_API_KEY}`,
+        'Content-Type': 'application/json'
+      },
+      body: JSON.stringify({
+        text: caption,
+        mediaFiles: [vaultId],
+        expireDays: 1,
+        isPinned: true
+      })
+    });
+    
+    if (!res.ok) {
+      const err = await res.text();
+      console.error(`Failed to create pinned post: ${err}`);
+      return null;
+    }
+    
+    const data = await res.json();
+    const postId = data.id || data.post_id || data.postId || data.data?.id;
+    console.log(`📌 Pinned: @${targetUsername} on ${promoterAccountId} (post ${postId})`);
+    return postId;
+  } catch (e) {
+    console.error(`Error creating pinned post:`, e);
+    return null;
+  }
+}
+
+async function runPinnedPostRotation() {
+  console.log('📌 === PINNED POST ROTATION ===');
+  
+  const vaultMappings = await loadVaultMappings();
+  const accountMap = await loadModelAccounts();
+  const allModels = Object.keys(vaultMappings).sort();
+  
+  if (allModels.length === 0) {
+    console.log('❌ No models with vault mappings');
+    return { success: false, error: 'No models' };
+  }
+  
+  const pinnedState = await getPinnedState();
+  
+  // Determine which 5 girls are featured today
+  const dayIndex = pinnedState.dayIndex || 0;
+  const startIdx = (dayIndex * PINNED_FEATURED_PER_DAY) % allModels.length;
+  const featuredGirls = [];
+  for (let i = 0; i < PINNED_FEATURED_PER_DAY; i++) {
+    featuredGirls.push(allModels[(startIdx + i) % allModels.length]);
+  }
+  
+  console.log(`📌 Today's featured (day ${dayIndex + 1}): ${featuredGirls.join(', ')}`);
+  
+  // For each featured girl, pick 6 accounts to pin on (not their own)
+  const activePosts = [];
+  const allOtherModels = [...allModels]; // pool of promoters
+  
+  for (const featured of featuredGirls) {
+    // Get available promoters (not the featured girl herself, and not already assigned)
+    const usedPromoters = new Set(activePosts.map(p => p.promoter));
+    const available = allOtherModels.filter(m => m !== featured && !usedPromoters.has(m));
+    
+    // Pick 6 random promoters
+    const shuffled = available.sort(() => Math.random() - 0.5);
+    const promoters = shuffled.slice(0, PINNED_ACCOUNTS_PER_GIRL);
+    
+    for (const promoter of promoters) {
+      const accountId = accountMap[promoter];
+      const vaultId = vaultMappings[promoter]?.[featured];
+      
+      if (!accountId || !vaultId) {
+        console.log(`⚠️ Missing account/vault for ${promoter} → ${featured}`);
+        continue;
+      }
+      
+      const postId = await createPinnedPost(accountId, featured, vaultId);
+      
+      if (postId) {
+        activePosts.push({
+          postId,
+          promoter,
+          featured,
+          accountId,
+          createdAt: Date.now()
+        });
+      }
+      
+      // Rate limit: 2s between posts
+      await new Promise(r => setTimeout(r, 2000));
+    }
+  }
+  
+  // Save state
+  const newState = {
+    dayIndex: dayIndex + 1,
+    activePosts,
+    lastRun: new Date().toISOString(),
+    featuredGirls
+  };
+  await savePinnedState(newState);
+  
+  console.log(`📌 Created ${activePosts.length} pinned posts for ${featuredGirls.length} featured girls`);
+  return { success: true, posts: activePosts.length, featured: featuredGirls };
+}
+
+async function removePinnedPosts() {
+  const pinnedState = await getPinnedState();
+  const posts = pinnedState.activePosts || [];
+  let removed = 0;
+  
+  for (const post of posts) {
+    const success = await deletePost(post.postId, post.accountId);
+    if (success) removed++;
+    await new Promise(r => setTimeout(r, 1000));
+  }
+  
+  pinnedState.activePosts = [];
+  await savePinnedState(pinnedState);
+  
+  console.log(`📌 Removed ${removed}/${posts.length} pinned posts`);
+  return { removed, total: posts.length };
+}
+
+// Run pinned posts at 6am AST = 10:00 UTC
+cron.schedule('0 10 * * *', async () => {
+  if (!isRunning) return;
+  
+  // Check if pinned posts are enabled
+  const pinnedEnabled = await redis.get('s4s:pinned-enabled');
+  if (pinnedEnabled === false) {
+    console.log('📌 Pinned posts disabled, skipping');
+    return;
+  }
+  
+  await runPinnedPostRotation();
+});
+
 // === STARTUP RECOVERY ===
 
 async function startupRecovery() {
@@ -468,12 +653,21 @@ app.get('/schedule', (req, res) => {
 
 app.get('/stats', async (req, res) => {
   const pending = await getPendingDeletes();
+  const pinnedState = await getPinnedState();
+  const pinnedEnabled = await redis.get('s4s:pinned-enabled');
   
   res.json({
     isRunning,
     stats: rotationState.stats,
     modelsActive: Object.keys(rotationState.dailySchedule).length,
     pendingDeletes: pending.length,
+    pinned: {
+      enabled: pinnedEnabled !== false,
+      activePosts: (pinnedState.activePosts || []).length,
+      lastRun: pinnedState.lastRun,
+      featuredGirls: pinnedState.featuredGirls || [],
+      dayIndex: pinnedState.dayIndex || 0
+    },
     pendingDeletesList: pending.map(p => ({
       postId: p.postId,
       promoter: p.promoter,
@@ -520,6 +714,40 @@ app.post('/cleanup', async (req, res) => {
   res.json({ cleaned, message: `Deleted ${cleaned} posts` });
 });
 
+// === PINNED POST ENDPOINTS ===
+
+app.get('/pinned', async (req, res) => {
+  const state = await getPinnedState();
+  const enabled = await redis.get('s4s:pinned-enabled');
+  res.json({
+    enabled: enabled !== false,
+    ...state,
+    activeCount: (state.activePosts || []).length
+  });
+});
+
+app.post('/pinned/run', async (req, res) => {
+  console.log('📌 Manual pinned post trigger...');
+  const result = await runPinnedPostRotation();
+  res.json(result);
+});
+
+app.post('/pinned/remove', async (req, res) => {
+  console.log('📌 Manual pinned post removal...');
+  const result = await removePinnedPosts();
+  res.json(result);
+});
+
+app.post('/pinned/enable', async (req, res) => {
+  await redis.set('s4s:pinned-enabled', true);
+  res.json({ enabled: true, message: 'Pinned posts enabled — will run at 6am AST' });
+});
+
+app.post('/pinned/disable', async (req, res) => {
+  await redis.set('s4s:pinned-enabled', false);
+  res.json({ enabled: false, message: 'Pinned posts disabled — existing pins stay up until they expire' });
+});
+
 app.get('/health', (req, res) => {
   res.json({ ok: true, timestamp: new Date().toISOString() });
 });
@@ -528,13 +756,18 @@ app.get('/health', (req, res) => {
 
 app.listen(PORT, async () => {
   console.log(`🚀 S4S Rotation Service running on port ${PORT}`);
-  console.log(`   POST /start    - Start rotation`);
-  console.log(`   POST /stop     - Stop rotation (cleans up)`);
-  console.log(`   POST /schedule - Receive schedule from app`);
-  console.log(`   POST /cleanup  - Force delete all pending`);
-  console.log(`   GET /schedule  - View upcoming tags`);
-  console.log(`   GET /stats     - View statistics`);
-  console.log(`   GET /active    - View active (undeleted) posts`);
+  console.log(`   POST /start         - Start rotation`);
+  console.log(`   POST /stop          - Stop rotation (cleans up ghost tags, keeps pins)`);
+  console.log(`   POST /schedule      - Receive schedule from app`);
+  console.log(`   POST /cleanup       - Force delete all pending ghost tags`);
+  console.log(`   GET  /schedule      - View upcoming tags`);
+  console.log(`   GET  /stats         - View statistics`);
+  console.log(`   GET  /active        - View active (undeleted) posts`);
+  console.log(`   GET  /pinned        - View pinned post status`);
+  console.log(`   POST /pinned/run    - Manually trigger pinned posts now`);
+  console.log(`   POST /pinned/remove - Force-remove all pinned posts`);
+  console.log(`   POST /pinned/enable - Enable daily pinned rotation`);
+  console.log(`   POST /pinned/disable- Disable (existing pins stay up)`);
   
   // Run startup recovery
   await startupRecovery();
