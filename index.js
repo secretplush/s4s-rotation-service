@@ -389,6 +389,7 @@ async function createPinnedPost(promoterAccountId, targetUsername, vaultId) {
   const caption = getPinnedCaption(targetUsername);
   
   try {
+    // Step 1: Create the post with 24hr expiry
     const res = await fetch(`${OF_API_BASE}/${promoterAccountId}/posts`, {
       method: 'POST',
       headers: {
@@ -398,8 +399,7 @@ async function createPinnedPost(promoterAccountId, targetUsername, vaultId) {
       body: JSON.stringify({
         text: caption,
         mediaFiles: [vaultId],
-        expireDays: 1,
-        isPinned: true
+        expireDays: 1
       })
     });
     
@@ -411,7 +411,28 @@ async function createPinnedPost(promoterAccountId, targetUsername, vaultId) {
     
     const data = await res.json();
     const postId = data.id || data.post_id || data.postId || data.data?.id;
-    console.log(`📌 Pinned: @${targetUsername} on ${promoterAccountId} (post ${postId})`);
+    
+    if (!postId) {
+      console.error('No post ID returned');
+      return null;
+    }
+    
+    // Step 2: Pin the post (separate API call)
+    await new Promise(r => setTimeout(r, 1000));
+    const pinRes = await fetch(`${OF_API_BASE}/${promoterAccountId}/posts/${postId}/pin`, {
+      method: 'POST',
+      headers: {
+        'Authorization': `Bearer ${OF_API_KEY}`,
+        'Content-Type': 'application/json'
+      }
+    });
+    
+    if (pinRes.ok) {
+      console.log(`📌 Pinned: @${targetUsername} on ${promoterAccountId} (post ${postId})`);
+    } else {
+      console.log(`⚠️ Posted but pin failed: @${targetUsername} on ${promoterAccountId} (post ${postId})`);
+    }
+    
     return postId;
   } catch (e) {
     console.error(`Error creating pinned post:`, e);
@@ -444,17 +465,31 @@ async function runPinnedPostRotation() {
   console.log(`📌 Today's featured (day ${dayIndex + 1}): ${featuredGirls.join(', ')}`);
   
   // For each featured girl, pick 6 accounts to pin on (not their own)
+  // Track history so the same girl doesn't get pinned on the same accounts repeatedly
   const activePosts = [];
   const allOtherModels = [...allModels]; // pool of promoters
   
+  // Load pin history: { featuredUsername: [promoter1, promoter2, ...] } (last used promoters)
+  const pinHistory = (await redis.get('s4s:pin-history')) || {};
+  
   for (const featured of featuredGirls) {
-    // Get available promoters (not the featured girl herself, and not already assigned)
+    // Get available promoters (not the featured girl herself, and not already assigned today)
     const usedPromoters = new Set(activePosts.map(p => p.promoter));
     const available = allOtherModels.filter(m => m !== featured && !usedPromoters.has(m));
     
-    // Pick 6 random promoters
-    const shuffled = available.sort(() => Math.random() - 0.5);
-    const promoters = shuffled.slice(0, PINNED_ACCOUNTS_PER_GIRL);
+    // Sort: prioritize accounts that HAVEN'T promoted this girl recently
+    const recentPromoters = new Set(pinHistory[featured] || []);
+    const fresh = available.filter(m => !recentPromoters.has(m));
+    const stale = available.filter(m => recentPromoters.has(m));
+    
+    // Pick from fresh first, then stale if not enough fresh
+    const shuffledFresh = fresh.sort(() => Math.random() - 0.5);
+    const shuffledStale = stale.sort(() => Math.random() - 0.5);
+    const promoters = [...shuffledFresh, ...shuffledStale].slice(0, PINNED_ACCOUNTS_PER_GIRL);
+    
+    // Update history: store this round's promoters (keep last 2 rounds = 12 accounts)
+    const prevHistory = pinHistory[featured] || [];
+    pinHistory[featured] = [...promoters, ...prevHistory].slice(0, PINNED_ACCOUNTS_PER_GIRL * 2);
     
     for (const promoter of promoters) {
       const accountId = accountMap[promoter];
@@ -465,7 +500,14 @@ async function runPinnedPostRotation() {
         continue;
       }
       
-      const postId = await createPinnedPost(accountId, featured, vaultId);
+      let postId = await createPinnedPost(accountId, featured, vaultId);
+      
+      // Retry once if rate limited
+      if (!postId) {
+        console.log(`⏳ Retrying ${promoter} → @${featured} after 12s...`);
+        await new Promise(r => setTimeout(r, 12000));
+        postId = await createPinnedPost(accountId, featured, vaultId);
+      }
       
       if (postId) {
         activePosts.push({
@@ -477,10 +519,14 @@ async function runPinnedPostRotation() {
         });
       }
       
-      // Rate limit: 2s between posts
-      await new Promise(r => setTimeout(r, 2000));
+      // 10-20s random spacing between posts to avoid rate limits and stagger naturally
+      const spacing = 10000 + Math.floor(Math.random() * 10000);
+      await new Promise(r => setTimeout(r, spacing));
     }
   }
+  
+  // Save pin history so next rotation uses different accounts
+  await redis.set('s4s:pin-history', pinHistory);
   
   // Save state
   const newState = {
@@ -524,7 +570,574 @@ cron.schedule('0 10 * * *', async () => {
     return;
   }
   
-  await runPinnedPostRotation();
+  // Stagger start by 0-2 min random offset to avoid predictability
+  const staggerMs = Math.floor(Math.random() * 2 * 60 * 1000);
+  console.log(`📌 Pinned posts scheduled, starting in ${Math.round(staggerMs/1000)}s...`);
+  setTimeout(() => runPinnedPostRotation(), staggerMs);
+});
+
+// === MASS DM PROMO SYSTEM ===
+
+const MASS_DM_CAPTIONS = [
+  "Have you seen my friend @{target}? 😍",
+  "You NEED to check out my girl @{target} 🔥",
+  "My friend @{target} is so hot omg go see her 😩",
+  "Go say hi to my bestie @{target} 💕",
+  "Ok but have you seen @{target} yet?? 👀",
+  "My girl @{target} is so fine it's not even fair 🥵",
+  "You'd love my friend @{target} trust me 😘",
+  "Obsessed with my girl @{target} rn go follow her 💋",
+  "If you like me you'll LOVE @{target} 😍",
+  "Go show some love to @{target} for me babe 💗",
+  "My friend @{target} just started and she's already killing it 🔥",
+  "Seriously go check out @{target} before everyone else does 👀",
+  "I can't stop looking at @{target}'s page omg 🥵",
+  "Do me a favor and go follow my girl @{target} 😘",
+  "You're welcome in advance… @{target} 🫣",
+  "My bestie @{target} is too fine to not share 💕",
+  "Tell @{target} I sent you 😏",
+  "Just wait until you see @{target} 🤤",
+  "Go subscribe to my girl @{target} you won't regret it 😍",
+  "Sharing my fav girl @{target} with you because I'm nice like that 😘",
+  "My college roommate @{target} finally made one 😍",
+  "This girl from my class @{target} just started… go look 👀",
+  "My sorority sister @{target} is so bad omg 🥵",
+  "Ok so @{target} just turned 18 and made an OF… you're welcome 🫣",
+  "@{target} literally just started posting and she's already so hot 🔥",
+  "My friend @{target} from school finally caved and made one 😩",
+  "College girls do it better… go see @{target} 💋",
+  "This freshman @{target} is about to blow up go follow now 👀",
+  "@{target} just turned 18 and I can't believe her page 🤤",
+  "My dorm mate @{target} started an OF and I'm obsessed 😍",
+  "She just turned 18 last week… go see @{target} before she blows up 🔥",
+  "@{target} is brand new and already hotter than everyone 🥵",
+  "My study buddy @{target} finally made a page go show her love 💕",
+  "Just found out @{target} from my campus made one… omg 👀",
+  "Newest girl on campus @{target} just dropped her first posts 😘",
+  "This college girl @{target} is unreal go look 🫣",
+  "@{target} just started her page and she's so nervous go be nice 🥺",
+  "My girl @{target} is fresh out of high school and already killing it 🔥",
+  "Campus cutie @{target} finally joined… trust me on this one 😏",
+  "She's barely 18 and already this fine?? go see @{target} 😩",
+];
+
+// 12 time windows in UTC hours (AST + 4)
+const MASS_DM_WINDOWS_UTC = [
+  { startHour: 4 },   // 12:00 AM - 1:00 AM AST
+  { startHour: 6 },   // 2:00 AM - 3:00 AM AST
+  { startHour: 8 },   // 4:00 AM - 5:00 AM AST
+  { startHour: 10 },  // 6:00 AM - 7:00 AM AST
+  { startHour: 12 },  // 8:00 AM - 9:00 AM AST
+  { startHour: 14 },  // 10:00 AM - 11:00 AM AST
+  { startHour: 16 },  // 12:00 PM - 1:00 PM AST
+  { startHour: 18 },  // 2:00 PM - 3:00 PM AST
+  { startHour: 20 },  // 4:00 PM - 5:00 PM AST
+  { startHour: 22 },  // 6:00 PM - 7:00 PM AST
+  { startHour: 0 },   // 8:00 PM - 9:00 PM AST (next UTC day)
+  { startHour: 2 },   // 10:00 PM - 11:00 PM AST (next UTC day)
+];
+
+function getMassDmCaption(targetUsername) {
+  const template = MASS_DM_CAPTIONS[Math.floor(Math.random() * MASS_DM_CAPTIONS.length)];
+  return template.replace('{target}', targetUsername);
+}
+
+async function generateMassDmSchedule() {
+  console.log('📨 Generating mass DM schedule...');
+  
+  const vaultMappings = await loadVaultMappings();
+  const allModels = Object.keys(vaultMappings).sort();
+  
+  if (allModels.length < 2) {
+    console.log('❌ Not enough models for mass DM schedule');
+    return;
+  }
+  
+  // Load promotion history to avoid repeats
+  const history = await redis.get('s4s:mass-dm-history') || {};
+  
+  const now = new Date();
+  const todayStr = now.toISOString().slice(0, 10);
+  const schedule = {};
+  
+  for (const model of allModels) {
+    const others = allModels.filter(m => m !== model);
+    
+    // Get recently promoted targets for this model
+    const recentlyPromoted = new Set(history[model] || []);
+    
+    // Prioritize targets not recently promoted
+    const fresh = others.filter(m => !recentlyPromoted.has(m));
+    const stale = others.filter(m => recentlyPromoted.has(m));
+    const shuffledFresh = fresh.sort(() => Math.random() - 0.5);
+    const shuffledStale = stale.sort(() => Math.random() - 0.5);
+    const pool = [...shuffledFresh, ...shuffledStale];
+    
+    // Pick 12 unique targets (or fewer if not enough models)
+    const targets = pool.slice(0, 12);
+    
+    // Update history: add today's targets, keep rolling window
+    const prevHistory = history[model] || [];
+    history[model] = [...targets, ...prevHistory].slice(0, others.length);
+    
+    // Assign each target to a time window with random minute
+    const entries = [];
+    for (let i = 0; i < targets.length && i < MASS_DM_WINDOWS_UTC.length; i++) {
+      const window = MASS_DM_WINDOWS_UTC[i];
+      const randomMinute = Math.floor(Math.random() * 60);
+      
+      // Calculate the actual UTC timestamp for this window today
+      const scheduled = new Date(now);
+      scheduled.setUTCHours(window.startHour, randomMinute, 0, 0);
+      
+      // Windows 0 and 2 (startHour 0, 2) are actually next UTC day for AST evening
+      if (window.startHour < 4) {
+        scheduled.setUTCDate(scheduled.getUTCDate() + 1);
+      }
+      
+      // Check if vault mapping exists for this promoter→target
+      const vaultId = vaultMappings[model]?.[targets[i]];
+      
+      entries.push({
+        target: targets[i],
+        windowIndex: i,
+        scheduledTime: scheduled.getTime(),
+        scheduledISO: scheduled.toISOString(),
+        vaultId: vaultId || null,
+        executed: false,
+        failed: false,
+        sentAt: null,
+      });
+    }
+    
+    schedule[model] = entries;
+  }
+  
+  // Save schedule and history
+  await redis.set('s4s:mass-dm-schedule', { date: todayStr, schedule });
+  await redis.set('s4s:mass-dm-history', history);
+  
+  const totalDms = Object.values(schedule).reduce((sum, entries) => sum + entries.length, 0);
+  console.log(`📨 Mass DM schedule generated: ${allModels.length} models × up to 12 windows = ${totalDms} DMs for ${todayStr}`);
+}
+
+// "NEW SFS Exclude" list IDs per account (username → list ID)
+// "NEW SFS Exclude" list IDs per account — using POPULATED lists (verified 2026-02-11)
+const SFS_EXCLUDE_LISTS = {
+  "skyyroseee": "1261988346",       // 0 users (team hasn't populated yet)
+  "yourrfavblondie": "1261988351",   // 0 users
+  "thesarasky": "1261988365",       // 21 users ✅
+  "chelseapaige": "1261988375",     // 0 users
+  "dollyrhodesss": "1261988388",    // 4 users ✅
+  "lilyyymonroee": "1261498701",    // 14 users ✅ (was 1261988410)
+  "lindamarievip": "1260524216",    // 9 users ✅ (was 1261988425)
+  "laceythomass": "1260552953",     // 15 users ✅ (was 1261988445)
+  "kaliblakexo": "1261524694",      // 4 users ✅ (was 1261988476)
+  "jessicaparkerrr": "1261988558",  // 31 users ✅ (was 1261988499)
+  "tyybabyy": "1261988505",        // 6 users ✅
+  "itsmealexisrae": "1261988522",   // 13 users ✅
+  "lolaxmae": "1261988531",         // 0 users
+  "rebeccabrownn": "1262027725",    // 2 users ✅ (was 1261988546)
+  "oliviabrookess": "1261988558",   // shared ID with jessicaparkerrr?
+  "milliexhart": "1256700429",      // 7 users ✅ (was 1261988563)
+  "zoepriceee": "1262020857",       // 0 users (was 1261988574)
+  "novaleighh": "1257095557",       // 34 users ✅ (was 1261988587)
+  "lucymonroee": "1258839857",      // 14 users ✅ (was 1261988600)
+  "chloecookk": "1261988618",       // not in our accounts
+  "jackiesmithh": "1260548516",     // 10 users ✅ (was 1261988627)
+  "brookeewest": "1262020881",      // 2 users ✅ (was 1261988637)
+  "ayaaann": "1261988660",          // not in our accounts
+  "chloeecavalli": "1262020825",    // 0 users (was 1261988667)
+  "sadieeblake": "1262020580",      // 0 users (was 1261988675)
+  "lolasinclairr": "1261988697",    // 9 users ✅
+  "maddieharperr": "1256821855",    // 12 users ✅ (was 1261988712)
+  "zoeemonroe": "1262020818",       // 0 users (was 1261988718)
+  "biancaawoods": "1262025288",     // 4 users ✅ (was 1261988726)
+  "aviannaarose": "1256700115",     // 10 users ✅ (was 1261988737)
+};
+
+async function sendMassDm(promoterUsername, targetUsername, vaultId, accountId) {
+  const caption = getMassDmCaption(targetUsername);
+  
+  try {
+    const excludeListId = SFS_EXCLUDE_LISTS[promoterUsername];
+    const body = {
+      text: caption,
+      mediaFiles: [vaultId],
+      userLists: ['fans', 'following'],
+      ...(excludeListId ? { excludedLists: [excludeListId] } : {}),
+    };
+    
+    const res = await fetch(`${OF_API_BASE}/${accountId}/mass-messaging`, {
+      method: 'POST',
+      headers: {
+        'Authorization': `Bearer ${OF_API_KEY}`,
+        'Content-Type': 'application/json',
+      },
+      body: JSON.stringify(body),
+    });
+    
+    if (res.status === 429) {
+      console.log(`⏳ Rate limited on mass DM ${promoterUsername} → @${targetUsername}, retrying in 15s...`);
+      await new Promise(r => setTimeout(r, 15000));
+      
+      const retry = await fetch(`${OF_API_BASE}/${accountId}/mass-messaging`, {
+        method: 'POST',
+        headers: {
+          'Authorization': `Bearer ${OF_API_KEY}`,
+          'Content-Type': 'application/json',
+        },
+        body: JSON.stringify(body),
+      });
+      
+      if (!retry.ok) {
+        const err = await retry.text();
+        console.error(`❌ Mass DM retry failed ${promoterUsername} → @${targetUsername}: ${err}`);
+        return false;
+      }
+      
+      const retryData = await retry.json();
+      const retryQueueId = retryData?.data?.[0]?.id || retryData?.id || null;
+      console.log(`📨 Mass DM sent (after retry): ${promoterUsername} → @${targetUsername} (queue: ${retryQueueId})`);
+      return { success: true, queueId: retryQueueId };
+    }
+    
+    if (!res.ok) {
+      const err = await res.text();
+      console.error(`❌ Mass DM failed ${promoterUsername} → @${targetUsername}: ${err}`);
+      return false;
+    }
+    
+    const data = await res.json();
+    const queueId = data?.data?.[0]?.id || data?.id || null;
+    console.log(`📨 Mass DM sent: ${promoterUsername} → @${targetUsername} (queue: ${queueId})`);
+    return { success: true, queueId };
+  } catch (e) {
+    console.error(`❌ Mass DM error ${promoterUsername} → @${targetUsername}:`, e);
+    return false;
+  }
+}
+
+let massDmProcessing = false;
+
+async function processMassDmSchedule() {
+  if (massDmProcessing) return; // Prevent overlapping runs
+  massDmProcessing = true;
+  
+  try {
+    await _processMassDmScheduleInner();
+  } finally {
+    massDmProcessing = false;
+  }
+}
+
+async function _processMassDmScheduleInner() {
+  const enabled = await redis.get('s4s:mass-dm-enabled');
+  console.log(`📨 Mass DM cron tick — enabled=${enabled} (type: ${typeof enabled})`);
+  if (enabled === false) return;
+  
+  const data = await redis.get('s4s:mass-dm-schedule');
+  if (!data || !data.schedule) {
+    console.log(`📨 Mass DM: no schedule data — data=${!!data}, schedule=${!!(data && data.schedule)}`);
+    return;
+  }
+  
+  const now = Date.now();
+  console.log(`📨 Mass DM: loading accounts...`);
+  const accountMap = await loadModelAccounts();
+  console.log(`📨 Mass DM: loaded ${Object.keys(accountMap).length} accounts, loading vault...`);
+  const vaultMappings = await loadVaultMappings();
+  console.log(`📨 Mass DM: loaded vault, processing ${Object.keys(data.schedule).length} models`);
+  
+  // Debug: check first non-executed entry
+  for (const [m, entries] of Object.entries(data.schedule)) {
+    for (const e of entries) {
+      if (!e.executed && !e.failed) {
+        console.log(`📨 Mass DM debug: first pending entry: ${m} → ${e.target}, scheduledTime=${e.scheduledTime} (type: ${typeof e.scheduledTime}), now=${now}, diff=${now - e.scheduledTime}ms`);
+        break;
+      }
+    }
+    break;
+  }
+  let modified = false;
+  let sentCount = 0;
+  
+  for (const [model, entries] of Object.entries(data.schedule)) {
+    const accountId = accountMap[model];
+    if (!accountId) continue;
+    
+    for (const entry of entries) {
+      if (entry.executed || entry.failed) continue;
+      if (entry.scheduledTime > now) continue;
+      
+      // Skip DMs that are more than 90 minutes overdue (missed window)
+      const overdueMs = now - entry.scheduledTime;
+      if (overdueMs > 90 * 60 * 1000) {
+        entry.executed = true;
+        entry.failed = true;
+        entry.error = 'missed_window';
+        modified = true;
+        continue;
+      }
+      
+      // Resolve vault ID if not cached
+      const vaultId = entry.vaultId || vaultMappings[model]?.[entry.target];
+      if (!vaultId) {
+        console.log(`⚠️ No vault ID for mass DM: ${model} → ${entry.target}`);
+        entry.failed = true;
+        entry.error = 'no_vault_id';
+        modified = true;
+        continue;
+      }
+      
+      const result = await sendMassDm(model, entry.target, vaultId, accountId);
+      const success = result && result.success;
+      const queueId = result && result.queueId;
+      entry.executed = true;
+      entry.sentAt = new Date().toISOString();
+      entry.queueId = queueId || null;
+      modified = true;
+      
+      if (success) {
+        sentCount++;
+        // Track in sent log with queue ID for unsending
+        try {
+          const sentLog = await redis.get('s4s:mass-dm-sent') || [];
+          sentLog.push({
+            promoter: model,
+            target: entry.target,
+            accountId,
+            queueId: queueId || null,
+            sentAt: entry.sentAt,
+            success: true,
+          });
+          // Keep last 500 entries
+          await redis.set('s4s:mass-dm-sent', sentLog.slice(-500));
+        } catch (e) { /* best effort */ }
+      } else {
+        entry.failed = true;
+        entry.error = 'api_error';
+        // Track failure
+        try {
+          const sentLog = await redis.get('s4s:mass-dm-sent') || [];
+          sentLog.push({
+            promoter: model,
+            target: entry.target,
+            sentAt: entry.sentAt,
+            success: false,
+          });
+          await redis.set('s4s:mass-dm-sent', sentLog.slice(-500));
+        } catch (e) { /* best effort */ }
+      }
+      
+      // 10 second delay between sends
+      await new Promise(r => setTimeout(r, 10000));
+    }
+  }
+  
+  if (modified) {
+    await redis.set('s4s:mass-dm-schedule', data);
+  }
+  
+  if (sentCount > 0) {
+    console.log(`📨 Processed ${sentCount} mass DMs this cycle`);
+  }
+}
+
+// Mass DM cron: every minute
+let massDmLastError = null;
+let massDmCronRuns = 0;
+cron.schedule('* * * * *', async () => {
+  massDmCronRuns++;
+  try {
+    await processMassDmSchedule();
+  } catch (e) {
+    massDmLastError = { message: e.message, stack: e.stack, at: new Date().toISOString() };
+    console.error('❌ Mass DM cron error:', e);
+  }
+});
+
+// Generate mass DM schedule at midnight UTC (8pm AST)
+cron.schedule('0 0 * * *', async () => {
+  const enabled = await redis.get('s4s:mass-dm-enabled');
+  if (enabled === false) return;
+  await generateMassDmSchedule();
+});
+
+// === MASS DM ENDPOINTS ===
+
+app.get('/mass-dm', async (req, res) => {
+  const enabled = await redis.get('s4s:mass-dm-enabled');
+  const data = await redis.get('s4s:mass-dm-schedule');
+  const sentLog = await redis.get('s4s:mass-dm-sent') || [];
+  
+  let todaySent = 0, todayPending = 0, todayFailed = 0, todayTotal = 0;
+  if (data && data.schedule) {
+    for (const entries of Object.values(data.schedule)) {
+      for (const e of entries) {
+        todayTotal++;
+        if (e.executed && !e.failed) todaySent++;
+        else if (e.failed) todayFailed++;
+        else todayPending++;
+      }
+    }
+  }
+  
+  const lastSent = sentLog.length > 0 ? sentLog[sentLog.length - 1].sentAt : null;
+  
+  res.json({
+    enabled: enabled !== false,
+    date: data?.date || null,
+    todaySent,
+    todayPending,
+    todayFailed,
+    todayTotal,
+    lastSent,
+    models: data?.schedule ? Object.keys(data.schedule).length : 0,
+    schedule: '12 windows, ' + (data?.schedule ? Object.keys(data.schedule).length : 0) + ' models',
+    debug: {
+      cronRuns: massDmCronRuns,
+      lastError: massDmLastError,
+      processing: massDmProcessing,
+    }
+  });
+});
+
+app.get('/mass-dm/schedule', async (req, res) => {
+  const data = await redis.get('s4s:mass-dm-schedule');
+  if (!data || !data.schedule) {
+    return res.json({ date: null, schedule: {} });
+  }
+  
+  const now = Date.now();
+  const summary = {};
+  for (const [model, entries] of Object.entries(data.schedule)) {
+    summary[model] = entries.map(e => ({
+      target: e.target,
+      scheduledTime: e.scheduledISO,
+      status: e.failed ? 'failed' : e.executed ? 'sent' : (e.scheduledTime <= now ? 'overdue' : 'pending'),
+      sentAt: e.sentAt,
+      error: e.error || null,
+    }));
+  }
+  
+  res.json({ date: data.date, schedule: summary });
+});
+
+app.post('/mass-dm/enable', async (req, res) => {
+  await redis.set('s4s:mass-dm-enabled', true);
+  
+  // Generate schedule if none exists for today
+  const data = await redis.get('s4s:mass-dm-schedule');
+  const todayStr = new Date().toISOString().slice(0, 10);
+  if (!data || data.date !== todayStr) {
+    await generateMassDmSchedule();
+  }
+  
+  res.json({ enabled: true, message: 'Mass DM system enabled' });
+});
+
+app.post('/mass-dm/test-cron', async (req, res) => {
+  console.log('📨 Manual cron test triggered');
+  try {
+    await _processMassDmScheduleInner();
+    res.json({ ok: true, message: 'Cron function ran' });
+  } catch (e) {
+    res.json({ ok: false, error: e.message, stack: e.stack });
+  }
+});
+
+// Unsend all tracked mass DMs
+app.post('/mass-dm/unsend-all', async (req, res) => {
+  const sentLog = await redis.get('s4s:mass-dm-sent') || [];
+  const toUnsend = sentLog.filter(e => e.success && e.queueId && e.accountId);
+  let unsent = 0;
+  let failed = 0;
+  
+  for (const entry of toUnsend) {
+    try {
+      const delRes = await fetch(`${OF_API_BASE}/${entry.accountId}/mass-messaging/${entry.queueId}`, {
+        method: 'DELETE',
+        headers: { 'Authorization': `Bearer ${OF_API_KEY}` }
+      });
+      if (delRes.ok) {
+        unsent++;
+        console.log(`🗑️ Unsent mass DM: ${entry.promoter} → @${entry.target} (queue: ${entry.queueId})`);
+      } else {
+        failed++;
+        const err = await delRes.text();
+        console.log(`⚠️ Failed to unsend ${entry.queueId}: ${err.slice(0, 100)}`);
+      }
+    } catch (e) {
+      failed++;
+    }
+    await new Promise(r => setTimeout(r, 300));
+  }
+  
+  res.json({ unsent, failed, total: toUnsend.length, message: `Unsent ${unsent} mass DMs` });
+});
+
+// Get sent log with queue IDs
+app.get('/mass-dm/sent', async (req, res) => {
+  const sentLog = await redis.get('s4s:mass-dm-sent') || [];
+  res.json({ 
+    total: sentLog.length,
+    withQueueId: sentLog.filter(e => e.queueId).length,
+    entries: sentLog.slice(-50) 
+  });
+});
+
+app.post('/mass-dm/disable', async (req, res) => {
+  await redis.set('s4s:mass-dm-enabled', false);
+  res.json({ enabled: false, message: 'Mass DM system disabled — pending DMs will not be sent' });
+});
+
+app.post('/mass-dm/run', async (req, res) => {
+  const enabled = await redis.get('s4s:mass-dm-enabled');
+  if (enabled === false) {
+    return res.json({ error: 'Mass DM system is disabled' });
+  }
+  
+  const data = await redis.get('s4s:mass-dm-schedule');
+  if (!data || !data.schedule) {
+    return res.json({ error: 'No schedule found — enable first' });
+  }
+  
+  const accountMap = await loadModelAccounts();
+  const vaultMappings = await loadVaultMappings();
+  const now = Date.now();
+  
+  // Find next pending DM (even if not yet due, for testing)
+  for (const [model, entries] of Object.entries(data.schedule)) {
+    for (const entry of entries) {
+      if (entry.executed || entry.failed) continue;
+      
+      const accountId = accountMap[model];
+      const vaultId = entry.vaultId || vaultMappings[model]?.[entry.target];
+      
+      if (!accountId || !vaultId) continue;
+      
+      const success = await sendMassDm(model, entry.target, vaultId, accountId);
+      entry.executed = true;
+      entry.sentAt = new Date().toISOString();
+      if (!success) {
+        entry.failed = true;
+        entry.error = 'manual_run_failed';
+      }
+      
+      await redis.set('s4s:mass-dm-schedule', data);
+      
+      return res.json({
+        sent: true,
+        promoter: model,
+        target: entry.target,
+        success,
+        scheduledTime: entry.scheduledISO,
+      });
+    }
+  }
+  
+  res.json({ sent: false, message: 'No pending DMs to send' });
 });
 
 // === STARTUP RECOVERY ===
@@ -545,6 +1158,18 @@ async function startupRecovery() {
     }
   } catch (e) {
     console.log('   No previous state found');
+  }
+  
+  // Generate mass DM schedule if needed
+  const massDmEnabled = await redis.get('s4s:mass-dm-enabled');
+  if (massDmEnabled !== false) {
+    const massDmData = await redis.get('s4s:mass-dm-schedule');
+    const todayStr = new Date().toISOString().slice(0, 10);
+    if (!massDmData || massDmData.date !== todayStr) {
+      await generateMassDmSchedule();
+    } else {
+      console.log(`   Mass DM schedule already exists for ${todayStr}`);
+    }
   }
   
   console.log('✅ Startup recovery complete');
@@ -656,11 +1281,35 @@ app.get('/stats', async (req, res) => {
   const pinnedState = await getPinnedState();
   const pinnedEnabled = await redis.get('s4s:pinned-enabled');
   
+  // Mass DM stats
+  const massDmEnabled = await redis.get('s4s:mass-dm-enabled');
+  const massDmData = await redis.get('s4s:mass-dm-schedule');
+  const massDmSentLog = await redis.get('s4s:mass-dm-sent') || [];
+  let massDmSent = 0, massDmPending = 0, massDmTotal = 0;
+  if (massDmData && massDmData.schedule) {
+    for (const entries of Object.values(massDmData.schedule)) {
+      for (const e of entries) {
+        massDmTotal++;
+        if (e.executed && !e.failed) massDmSent++;
+        else if (!e.executed && !e.failed) massDmPending++;
+      }
+    }
+  }
+  const massDmLastSent = massDmSentLog.length > 0 ? massDmSentLog[massDmSentLog.length - 1].sentAt : null;
+
   res.json({
     isRunning,
     stats: rotationState.stats,
     modelsActive: Object.keys(rotationState.dailySchedule).length,
     pendingDeletes: pending.length,
+    massDm: {
+      enabled: massDmEnabled !== false,
+      todaySent: massDmSent,
+      todayPending: massDmPending,
+      todayTotal: massDmTotal,
+      lastSent: massDmLastSent,
+      schedule: '12 windows, ' + (massDmData?.schedule ? Object.keys(massDmData.schedule).length : 0) + ' models',
+    },
     pinned: {
       enabled: pinnedEnabled !== false,
       activePosts: (pinnedState.activePosts || []).length,
@@ -768,6 +1417,11 @@ app.listen(PORT, async () => {
   console.log(`   POST /pinned/remove - Force-remove all pinned posts`);
   console.log(`   POST /pinned/enable - Enable daily pinned rotation`);
   console.log(`   POST /pinned/disable- Disable (existing pins stay up)`);
+  console.log(`   GET  /mass-dm       - Mass DM status & stats`);
+  console.log(`   GET  /mass-dm/schedule - View today's full schedule`);
+  console.log(`   POST /mass-dm/enable  - Enable mass DM system`);
+  console.log(`   POST /mass-dm/disable - Disable mass DM system`);
+  console.log(`   POST /mass-dm/run     - Manually trigger next pending DM`);
   
   // Run startup recovery
   await startupRecovery();
