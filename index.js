@@ -353,8 +353,8 @@ cron.schedule('0 0 * * *', async () => {
 // Stopping rotation does NOT remove pinned posts
 
 const PINNED_REDIS_KEY = 's4s:pinned-state';
-const PINNED_FEATURED_PER_DAY = 5;
-const PINNED_ACCOUNTS_PER_GIRL = 6;
+const PINNED_FEATURED_PER_DAY = 10;
+const PINNED_ACCOUNTS_PER_GIRL = 5;
 
 const PINNED_CAPTIONS = [
   "my girl 💕 go follow @{target} rn",
