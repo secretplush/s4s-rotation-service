@@ -1344,6 +1344,71 @@ app.get('/stats', async (req, res) => {
   });
 });
 
+// Full dashboard data — single source of truth for the S4S app
+app.get('/dashboard', async (req, res) => {
+  const vaultMappings = await loadVaultMappings();
+  const allModels = Object.keys(vaultMappings).sort();
+  const targetable = allModels.filter(m => !PROMOTER_ONLY.has(m));
+  const pinnedState = await getPinnedState();
+  const massDmData = await redis.get('s4s:mass-dm-schedule');
+  
+  // Ghost tag schedule summary per model
+  const ghostTagSummary = {};
+  let totalTagsToday = 0;
+  for (const [model, schedules] of Object.entries(rotationState.dailySchedule)) {
+    const executed = schedules.filter(s => s.executed).length;
+    const pending = schedules.filter(s => !s.executed).length;
+    ghostTagSummary[model] = { total: schedules.length, executed, pending };
+    totalTagsToday += schedules.length;
+  }
+  
+  // Mass DM summary per model
+  const massDmSummary = {};
+  let totalDmsToday = 0;
+  if (massDmData?.schedule) {
+    for (const [model, entries] of Object.entries(massDmData.schedule)) {
+      const sent = entries.filter(e => e.executed && !e.failed).length;
+      const pending = entries.filter(e => !e.executed && !e.failed).length;
+      massDmSummary[model] = { total: entries.length, sent, pending };
+      totalDmsToday += entries.length;
+    }
+  }
+  
+  res.json({
+    config: {
+      tagsPerModelPerDay: 57,
+      pinnedFeaturedPerDay: PINNED_FEATURED_PER_DAY,
+      pinnedPromotersPerFeatured: PINNED_ACCOUNTS_PER_GIRL,
+      massDmWindowsPerDay: 12,
+      promoterOnly: [...PROMOTER_ONLY],
+    },
+    models: {
+      total: allModels.length,
+      targetable: targetable.length,
+      promoterOnly: [...PROMOTER_ONLY].filter(m => allModels.includes(m)),
+      list: allModels,
+    },
+    ghostTags: {
+      isRunning,
+      totalTagsToday,
+      avgPerModel: allModels.length > 0 ? Math.round(totalTagsToday / allModels.length) : 0,
+      perModel: ghostTagSummary,
+    },
+    pinnedPosts: {
+      enabled: (await redis.get('s4s:pinned-enabled')) !== false,
+      featuredToday: pinnedState.featuredGirls || [],
+      dayIndex: pinnedState.dayIndex || 0,
+      totalDaysForFullRotation: Math.ceil(targetable.length / PINNED_FEATURED_PER_DAY),
+      activePosts: (pinnedState.activePosts || []).length,
+    },
+    massDm: {
+      enabled: (await redis.get('s4s:mass-dm-enabled')) !== false,
+      totalDmsToday,
+      perModel: massDmSummary,
+    },
+  });
+});
+
 app.get('/active', async (req, res) => {
   const pending = await getPendingDeletes();
   const now = Date.now();
