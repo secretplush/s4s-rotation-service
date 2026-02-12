@@ -736,36 +736,59 @@ async function generateMassDmSchedule() {
 // "NEW SFS Exclude" list IDs per account (username → list ID)
 // "NEW SFS Exclude" list IDs per account — using POPULATED lists (verified 2026-02-11)
 const SFS_EXCLUDE_LISTS = {
-  "skyyroseee": "1261988346",       // 0 users (team hasn't populated yet)
-  "yourrfavblondie": "1261988351",   // 0 users
-  "thesarasky": "1261988365",       // 21 users ✅
-  "chelseapaige": "1261988375",     // 0 users
-  "dollyrhodesss": "1261988388",    // 4 users ✅
-  "lilyyymonroee": "1261498701",    // 14 users ✅ (was 1261988410)
-  "lindamarievip": "1260524216",    // 9 users ✅ (was 1261988425)
-  "laceythomass": "1260552953",     // 15 users ✅ (was 1261988445)
-  "kaliblakexo": "1261524694",      // 4 users ✅ (was 1261988476)
-  "jessicaparkerrr": "1261988558",  // 31 users ✅ (was 1261988499)
-  "tyybabyy": "1261988505",        // 6 users ✅
-  "itsmealexisrae": "1261988522",   // 13 users ✅
-  "lolaxmae": "1261988531",         // 0 users
-  "rebeccabrownn": "1262027725",    // 2 users ✅ (was 1261988546)
-  "oliviabrookess": "1261988558",   // shared ID with jessicaparkerrr?
-  "milliexhart": "1256700429",      // 7 users ✅ (was 1261988563)
-  "zoepriceee": "1262020857",       // 0 users (was 1261988574)
-  "novaleighh": "1257095557",       // 34 users ✅ (was 1261988587)
-  "lucymonroee": "1258839857",      // 14 users ✅ (was 1261988600)
-  "chloecookk": "1261988618",       // not in our accounts
-  "jackiesmithh": "1260548516",     // 10 users ✅ (was 1261988627)
-  "brookeewest": "1262020881",      // 2 users ✅ (was 1261988637)
-  "ayaaann": "1261988660",          // not in our accounts
-  "chloeecavalli": "1262020825",    // 0 users (was 1261988667)
-  "sadieeblake": "1262020580",      // 0 users (was 1261988675)
-  "lolasinclairr": "1261988697",    // 9 users ✅
-  "maddieharperr": "1256821855",    // 12 users ✅ (was 1261988712)
-  "zoeemonroe": "1262020818",       // 0 users (was 1261988718)
-  "biancaawoods": "1262025288",     // 4 users ✅ (was 1261988726)
-  "aviannaarose": "1256700115",     // 10 users ✅ (was 1261988737)
+  // --- Original 30 (working lists) ---
+  "skyyroseee": "1261988346",
+  "yourrfavblondie": "1261988351",
+  "thesarasky": "1261988365",
+  "chelseapaige": "1261988375",
+  "dollyrhodesss": "1261988388",
+  "lilyyymonroee": "1261498701",
+  "lindamarievip": "1260524216",
+  "laceythomass": "1260552953",
+  "kaliblakexo": "1261524694",
+  "jessicaparkerrr": "1261988558",
+  "tyybabyy": "1261988505",
+  "itsmealexisrae": "1261988522",
+  "lolaxmae": "1261988531",
+  "rebeccabrownn": "1262027725",
+  "milliexhart": "1256700429",
+  "zoepriceee": "1262020857",
+  "novaleighh": "1257095557",
+  "lucymonroee": "1258839857",
+  "jackiesmithh": "1260548516",
+  "brookeewest": "1262020881",
+  "chloeecavalli": "1262020825",
+  "sadieeblake": "1262020580",
+  "lolasinclairr": "1261988697",
+  "maddieharperr": "1256821855",
+  "zoeemonroe": "1262020818",
+  "biancaawoods": "1262025288",
+  "aviannaarose": "1256700115",
+  // --- NEW "SFS Exclude List 2.0" (created 2026-02-12) ---
+  "andreaelizabethxo": "1262454105",
+  "brittanyhalden": "1262454139",
+  "caddieissues": "1262454162",
+  "caraaawesley": "1262454169",
+  "carlyyyb": "1262454179",
+  "chloecollinsxo": "1262454197",
+  "ellieharperr": "1262454215",
+  "giselemars": "1262454229",
+  "kaitlynxbeckham": "1262454253",
+  "keelydavidson": "1262454290",
+  "kybabyrae": "1262454313",
+  "lilywestt": "1262454328",
+  "madsabigail": "1262454361",
+  "nickyecker": "1262454374",
+  "rachelxbennett": "1262454380",
+  "saralovexx": "1262454399",
+  "taylorskully": "1262454416",
+  "tessaxsloane": "1262454430",
+  "winterclaire": "1262454452",
+  "xoharperr": "1262454473",
+  // --- Fixed (were broken, now have own lists) ---
+  "oliviabrookess": "1262454505",
+  "chloecookk": "1262454515",
+  "ayaaann": "1262454532",
 };
 
 async function sendMassDm(promoterUsername, targetUsername, vaultId, accountId) {
