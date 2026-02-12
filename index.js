@@ -153,17 +153,22 @@ async function loadModelAccounts() {
   }
 }
 
+// Models that promote others but are NEVER tagged/promoted themselves (no promo image)
+const PROMOTER_ONLY = new Set(['taylorskully']);
+
 function generateDailySchedule(models, vaultMappings) {
   const schedule = {};
   const now = Date.now();
   
   for (const model of models) {
-    const targets = Object.keys(vaultMappings[model] || {});
+    // Filter targets: exclude promoter-only models (they have no image to tag with)
+    const allTargets = Object.keys(vaultMappings[model] || {});
+    const targets = allTargets.filter(t => !PROMOTER_ONLY.has(t));
     if (targets.length === 0) continue;
     
     const shuffledTargets = [...targets].sort(() => Math.random() - 0.5);
-    const tagsPerDay = 56;
-    const baseInterval = 25.7 * 60 * 1000;
+    const tagsPerDay = 57;
+    const baseInterval = (24 * 60 * 60 * 1000) / tagsPerDay; // ~25.3 min
     
     schedule[model] = [];
     let currentTime = now + (1 + Math.random() * 4) * 60 * 1000;
@@ -446,6 +451,8 @@ async function runPinnedPostRotation() {
   const vaultMappings = await loadVaultMappings();
   const accountMap = await loadModelAccounts();
   const allModels = Object.keys(vaultMappings).sort();
+  // Models eligible to be FEATURED (promoted) — exclude promoter-only models
+  const targetableModels = allModels.filter(m => !PROMOTER_ONLY.has(m));
   
   if (allModels.length === 0) {
     console.log('❌ No models with vault mappings');
@@ -454,12 +461,12 @@ async function runPinnedPostRotation() {
   
   const pinnedState = await getPinnedState();
   
-  // Determine which 5 girls are featured today
+  // Determine which 5 girls are featured today (from targetable models only)
   const dayIndex = pinnedState.dayIndex || 0;
-  const startIdx = (dayIndex * PINNED_FEATURED_PER_DAY) % allModels.length;
+  const startIdx = (dayIndex * PINNED_FEATURED_PER_DAY) % targetableModels.length;
   const featuredGirls = [];
   for (let i = 0; i < PINNED_FEATURED_PER_DAY; i++) {
-    featuredGirls.push(allModels[(startIdx + i) % allModels.length]);
+    featuredGirls.push(targetableModels[(startIdx + i) % targetableModels.length]);
   }
   
   console.log(`📌 Today's featured (day ${dayIndex + 1}): ${featuredGirls.join(', ')}`);
@@ -658,59 +665,64 @@ async function generateMassDmSchedule() {
   
   const now = new Date();
   const todayStr = now.toISOString().slice(0, 10);
-  const schedule = {};
   
+  // Build target assignments per model (12 targets each)
+  // Promoter-only models can SEND mass DMs but are never promoted as targets
+  const modelTargets = {};
   for (const model of allModels) {
-    const others = allModels.filter(m => m !== model);
-    
-    // Get recently promoted targets for this model
+    const others = allModels.filter(m => m !== model && !PROMOTER_ONLY.has(m));
     const recentlyPromoted = new Set(history[model] || []);
-    
-    // Prioritize targets not recently promoted
     const fresh = others.filter(m => !recentlyPromoted.has(m));
     const stale = others.filter(m => recentlyPromoted.has(m));
     const shuffledFresh = fresh.sort(() => Math.random() - 0.5);
     const shuffledStale = stale.sort(() => Math.random() - 0.5);
     const pool = [...shuffledFresh, ...shuffledStale];
+    const targets = pool.slice(0, MASS_DM_WINDOWS_UTC.length);
     
-    // Pick 12 unique targets (or fewer if not enough models)
-    const targets = pool.slice(0, 12);
-    
-    // Update history: add today's targets, keep rolling window
     const prevHistory = history[model] || [];
     history[model] = [...targets, ...prevHistory].slice(0, others.length);
+    modelTargets[model] = targets;
+  }
+  
+  // Build schedule: for each window, space all models evenly across the hour
+  // interval = 60 minutes / number of models
+  const intervalMinutes = 60 / allModels.length;
+  const schedule = {};
+  
+  // Shuffle model order for each window so the same model isn't always first
+  for (let windowIdx = 0; windowIdx < MASS_DM_WINDOWS_UTC.length; windowIdx++) {
+    const window = MASS_DM_WINDOWS_UTC[windowIdx];
+    const shuffledModels = [...allModels].sort(() => Math.random() - 0.5);
     
-    // Assign each target to a time window with random minute
-    const entries = [];
-    for (let i = 0; i < targets.length && i < MASS_DM_WINDOWS_UTC.length; i++) {
-      const window = MASS_DM_WINDOWS_UTC[i];
-      const randomMinute = Math.floor(Math.random() * 60);
+    for (let modelIdx = 0; modelIdx < shuffledModels.length; modelIdx++) {
+      const model = shuffledModels[modelIdx];
+      const target = modelTargets[model]?.[windowIdx];
+      if (!target) continue;
       
-      // Calculate the actual UTC timestamp for this window today
+      // Space evenly: model 0 at :00, model 1 at :02, model 2 at :04, etc.
+      const offsetMinutes = Math.round(modelIdx * intervalMinutes);
+      
       const scheduled = new Date(now);
-      scheduled.setUTCHours(window.startHour, randomMinute, 0, 0);
+      scheduled.setUTCHours(window.startHour, offsetMinutes, 0, 0);
       
       // Windows 0 and 2 (startHour 0, 2) are actually next UTC day for AST evening
       if (window.startHour < 4) {
         scheduled.setUTCDate(scheduled.getUTCDate() + 1);
       }
       
-      // Check if vault mapping exists for this promoter→target
-      const vaultId = vaultMappings[model]?.[targets[i]];
+      const vaultId = vaultMappings[model]?.[target];
       
-      entries.push({
-        target: targets[i],
-        windowIndex: i,
-        scheduledTime: scheduled.getTime(),
-        scheduledISO: scheduled.toISOString(),
+      if (!schedule[model]) schedule[model] = [];
+      schedule[model].push({
+        target,
+        windowIndex: windowIdx,
+        scheduledTime: scheduled.toISOString(),
         vaultId: vaultId || null,
         executed: false,
         failed: false,
         sentAt: null,
       });
     }
-    
-    schedule[model] = entries;
   }
   
   // Save schedule and history
@@ -718,7 +730,7 @@ async function generateMassDmSchedule() {
   await redis.set('s4s:mass-dm-history', history);
   
   const totalDms = Object.values(schedule).reduce((sum, entries) => sum + entries.length, 0);
-  console.log(`📨 Mass DM schedule generated: ${allModels.length} models × up to 12 windows = ${totalDms} DMs for ${todayStr}`);
+  console.log(`📨 Mass DM schedule generated: ${allModels.length} models × ${intervalMinutes.toFixed(1)} min intervals × ${MASS_DM_WINDOWS_UTC.length} windows = ${totalDms} DMs for ${todayStr}`);
 }
 
 // "NEW SFS Exclude" list IDs per account (username → list ID)
@@ -849,16 +861,6 @@ async function _processMassDmScheduleInner() {
   const vaultMappings = await loadVaultMappings();
   console.log(`📨 Mass DM: loaded vault, processing ${Object.keys(data.schedule).length} models`);
   
-  // Debug: check first non-executed entry
-  for (const [m, entries] of Object.entries(data.schedule)) {
-    for (const e of entries) {
-      if (!e.executed && !e.failed) {
-        console.log(`📨 Mass DM debug: first pending entry: ${m} → ${e.target}, scheduledTime=${e.scheduledTime} (type: ${typeof e.scheduledTime}), now=${now}, diff=${now - e.scheduledTime}ms`);
-        break;
-      }
-    }
-    break;
-  }
   let modified = false;
   let sentCount = 0;
   
@@ -868,11 +870,16 @@ async function _processMassDmScheduleInner() {
     
     for (const entry of entries) {
       if (entry.executed || entry.failed) continue;
-      if (entry.scheduledTime > now) continue;
       
-      // Skip DMs that are more than 90 minutes overdue (missed window)
-      const overdueMs = now - entry.scheduledTime;
-      if (overdueMs > 90 * 60 * 1000) {
+      // Parse scheduled time (stored as ISO string)
+      const scheduledMs = new Date(entry.scheduledTime).getTime();
+      
+      // Not yet time — skip
+      if (scheduledMs > now) continue;
+      
+      // If more than 5 minutes past the scheduled time, skip it (no catch-up)
+      const overdueMs = now - scheduledMs;
+      if (overdueMs > 5 * 60 * 1000) {
         entry.executed = true;
         entry.failed = true;
         entry.error = 'missed_window';
@@ -1015,7 +1022,7 @@ app.get('/mass-dm/schedule', async (req, res) => {
     summary[model] = entries.map(e => ({
       target: e.target,
       scheduledTime: e.scheduledISO,
-      status: e.failed ? 'failed' : e.executed ? 'sent' : (e.scheduledTime <= now ? 'overdue' : 'pending'),
+      status: e.failed ? 'failed' : e.executed ? 'sent' : (new Date(e.scheduledTime).getTime() <= now ? 'ready' : 'pending'),
       sentAt: e.sentAt,
       error: e.error || null,
     }));
@@ -1027,14 +1034,24 @@ app.get('/mass-dm/schedule', async (req, res) => {
 app.post('/mass-dm/enable', async (req, res) => {
   await redis.set('s4s:mass-dm-enabled', true);
   
-  // Generate schedule if none exists for today
+  // Always regenerate schedule on enable so timing starts fresh from NOW
+  await generateMassDmSchedule();
+  
   const data = await redis.get('s4s:mass-dm-schedule');
-  const todayStr = new Date().toISOString().slice(0, 10);
-  if (!data || data.date !== todayStr) {
-    await generateMassDmSchedule();
+  const totalDms = data ? Object.values(data.schedule).reduce((sum, entries) => sum + entries.length, 0) : 0;
+  
+  // Count how many are still in the future
+  const now = Date.now();
+  let futureDms = 0;
+  if (data?.schedule) {
+    for (const entries of Object.values(data.schedule)) {
+      for (const e of entries) {
+        if (new Date(e.scheduledTime).getTime() > now) futureDms++;
+      }
+    }
   }
   
-  res.json({ enabled: true, message: 'Mass DM system enabled' });
+  res.json({ enabled: true, message: 'Mass DM system enabled', totalDms, futureDms });
 });
 
 app.post('/mass-dm/test-cron', async (req, res) => {
