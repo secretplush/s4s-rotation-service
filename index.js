@@ -1645,6 +1645,18 @@ app.post('/pinned/disable', async (req, res) => {
   res.json({ enabled: false, message: 'Pinned posts disabled — existing pins stay up until they expire' });
 });
 
+app.post('/api/regenerate-schedule', async (req, res) => {
+  try {
+    console.log('🔄 Manual schedule regeneration triggered');
+    const vaultMappings = await loadVaultMappings();
+    const models = Object.keys(vaultMappings);
+    rotationState.dailySchedule = generateDailySchedule(models, vaultMappings);
+    res.json({ success: true, models: models.length, message: 'Schedule regenerated' });
+  } catch (e) {
+    res.status(500).json({ error: String(e) });
+  }
+});
+
 app.get('/health', (req, res) => {
   res.json({ ok: true, timestamp: new Date().toISOString() });
 });
