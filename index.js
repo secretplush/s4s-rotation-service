@@ -316,6 +316,11 @@ async function deletePost(postId, accountId) {
       return true;
     } else {
       const err = await res.text();
+      // If post is already deleted/not found, treat as success
+      if (res.status === 404 || err.includes('not found') || err.includes('already deleted')) {
+        console.log(`🗑️ Post ${postId} already deleted, cleaning up`);
+        return true;
+      }
       console.error(`Failed to delete post ${postId}:`, err);
       return false;
     }
