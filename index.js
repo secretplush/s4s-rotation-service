@@ -851,8 +851,8 @@ async function generateMassDmSchedule() {
 }
 
 // "NEW SFS Exclude" list IDs per account (username → list ID)
-// "NEW SFS Exclude" list IDs per account — using POPULATED lists (verified 2026-02-11)
-const SFS_EXCLUDE_LISTS = {
+// Hardcoded fallback — seeded to Redis on startup, then read from Redis
+const SFS_EXCLUDE_LISTS_HARDCODED = {
   // --- Original 30 (working lists) ---
   "skyyroseee": "1261988346",
   "yourrfavblondie": "1261988351",
@@ -908,11 +908,33 @@ const SFS_EXCLUDE_LISTS = {
   "ayaaann": "1262454532",
 };
 
+// Dynamic SFS exclude lists from Redis (loaded on startup, refreshed periodically)
+let sfsExcludeLists = { ...SFS_EXCLUDE_LISTS_HARDCODED };
+
+async function loadSfsExcludeLists() {
+  try {
+    const data = await redis.hgetall('sfs_exclude_lists');
+    if (data && Object.keys(data).length > 0) {
+      sfsExcludeLists = data;
+      console.log(`📋 Loaded ${Object.keys(data).length} SFS exclude lists from Redis`);
+    } else {
+      // Seed Redis from hardcoded lists
+      console.log('📋 Seeding SFS exclude lists to Redis...');
+      await redis.hset('sfs_exclude_lists', SFS_EXCLUDE_LISTS_HARDCODED);
+      sfsExcludeLists = { ...SFS_EXCLUDE_LISTS_HARDCODED };
+      console.log(`📋 Seeded ${Object.keys(SFS_EXCLUDE_LISTS_HARDCODED).length} SFS exclude lists to Redis`);
+    }
+  } catch (e) {
+    console.error('❌ Failed to load SFS exclude lists from Redis, using hardcoded:', e.message);
+    sfsExcludeLists = { ...SFS_EXCLUDE_LISTS_HARDCODED };
+  }
+}
+
 async function sendMassDm(promoterUsername, targetUsername, vaultId, accountId) {
   const caption = getMassDmCaption(targetUsername);
   
   try {
-    const excludeListId = SFS_EXCLUDE_LISTS[promoterUsername];
+    const excludeListId = sfsExcludeLists[promoterUsername];
     const body = {
       text: caption,
       mediaFiles: [vaultId],
@@ -1687,6 +1709,9 @@ app.listen(PORT, async () => {
   console.log(`   POST /mass-dm/enable  - Enable mass DM system`);
   console.log(`   POST /mass-dm/disable - Disable mass DM system`);
   console.log(`   POST /mass-dm/run     - Manually trigger next pending DM`);
+  
+  // Load SFS exclude lists from Redis (seeds if needed)
+  await loadSfsExcludeLists();
   
   // Run startup recovery
   await startupRecovery();
