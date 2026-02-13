@@ -17,6 +17,16 @@ const redis = new Redis({
   token: process.env.KV_REST_API_TOKEN,
 });
 
+// In-memory feed logs (last 100 events each)
+const massDmFeed = [];
+const ghostTagFeed = [];
+const MAX_FEED_SIZE = 100;
+
+function addToFeed(feed, entry) {
+  feed.unshift({ ...entry, timestamp: Date.now() });
+  if (feed.length > MAX_FEED_SIZE) feed.length = MAX_FEED_SIZE;
+}
+
 // Keys for Redis persistence
 const REDIS_KEYS = {
   PENDING_DELETES: 's4s:pending-deletes',
@@ -54,6 +64,36 @@ const GHOST_CAPTIONS = [
   "prettiest girl @{target} 💗",
   "bestie appreciation post @{target} 🥹",
   "heart eyes for @{target} 😍",
+  "omg @{target} go follow her 🤭",
+  "@{target} is so fine why is no one talking about her",
+  "my bestie @{target} just posted and im dead 😭",
+  "go look at @{target} rn trust me 💕",
+  "@{target} has free vip today go go go",
+  "this girl @{target} from my school is crazy pretty 👀",
+  "@{target} just dropped something insane on her page",
+  "why is @{target} so underrated go sub 💕",
+  "cant believe @{target} is real honestly 🤭",
+  "@{target} just turned 18 and made an of omg",
+  "free sub to @{target} today shes new",
+  "my roommate @{target} is way too pretty for this app 😩",
+  "@{target} posting daily and nobody knows yet 👀",
+  "go be nice to @{target} shes brand new 💕",
+  "@{target} has the cutest page go see",
+  "college bestie @{target} finally made one 🙈",
+  "@{target} is free rn dont sleep on her",
+  "ok but @{target} tho 😍",
+  "everyone sleeping on @{target} fr",
+  "my girl @{target} just started go show love 💕",
+  "@{target} is giving everything rn 🔥",
+  "go sub to @{target} before she blows up 👀",
+  "freshman @{target} just launched and wow",
+  "@{target} from my dorm is so bad omg 🙈",
+  "free vip on @{target} go quick",
+  "@{target} is the prettiest girl on here no cap 💕",
+  "someone tell @{target} shes famous now 😭",
+  "just found @{target} and im obsessed",
+  "@{target} is new and already killing it 🔥",
+  "subscribe to @{target} its free and shes gorgeous 💕",
 ];
 
 // === REDIS-BACKED PENDING DELETES ===
@@ -296,6 +336,7 @@ async function runRotationCycle() {
       sched.executed = true;
       
       if (postId) {
+        addToFeed(ghostTagFeed, { promoter: model, target: sched.target, postId });
         // Track executed tag
         rotationState.executedTags.push({
           postId,
@@ -353,8 +394,9 @@ cron.schedule('0 0 * * *', async () => {
 // Stopping rotation does NOT remove pinned posts
 
 const PINNED_REDIS_KEY = 's4s:pinned-state';
-const PINNED_FEATURED_PER_DAY = 10;
+// Dynamic: floor(totalModels / 5) featured girls per day, each pinned to 5 pages
 const PINNED_ACCOUNTS_PER_GIRL = 5;
+// PINNED_FEATURED_PER_DAY is calculated dynamically in runPinnedPostRotation()
 
 const PINNED_CAPTIONS = [
   "my girl 💕 go follow @{target} rn",
@@ -367,6 +409,36 @@ const PINNED_CAPTIONS = [
   "she's that girl @{target} 🔥",
   "my fav human @{target} 💗",
   "go show love to @{target} 🥹",
+  "@{target} just turned 18 and her vip is free rn 🤭",
+  "my roommate @{target} has free vip for 24 hrs go look",
+  "@{target} literally just turned 18 go sub its free 💕",
+  "free vip on @{target} today shes brand new",
+  "@{target} from my college just made her page free",
+  "shes 18 and free vip for today only @{target} 👀",
+  "my sorority sister @{target} just dropped a free page",
+  "@{target} turned 18 and made a free of lol go see",
+  "free 24hr vip on @{target} shes so cute",
+  "@{target} just turned 18 her page is free rn go",
+  "this girl from my dorm @{target} has free vip today 🙈",
+  "college girl @{target} just made her vip free go sub",
+  "@{target} is brand new and free for 24 hours",
+  "my friend @{target} just turned 18 and shes free rn",
+  "go sub to @{target} its free she just started 💕",
+  "@{target} from campus just launched a free page omg",
+  "freshman @{target} has free vip up for today",
+  "@{target} is 18 and giving free access go look 👀",
+  "my college bestie @{target} made her page free today",
+  "free vip @{target} she just turned 18 🤭",
+  "@{target} doing free subs for today shes so new",
+  "this girl @{target} from my class has a free page now",
+  "@{target} just started her of and its free rn go",
+  "my dorm mate @{target} is free for 24 hrs 💕",
+  "go follow @{target} shes free and just turned 18",
+  "@{target} launched today with free vip shes adorable",
+  "college cutie @{target} free vip for today only",
+  "@{target} is new and her page is free go see 👀",
+  "my girl @{target} from school just went free for 24hrs",
+  "@{target} just turned 18 free vip go before she changes it",
 ];
 
 function getPinnedCaption(targetUsername) {
@@ -461,17 +533,23 @@ async function runPinnedPostRotation() {
   
   const pinnedState = await getPinnedState();
   
-  // Determine which 5 girls are featured today (from targetable models only)
+  // Fixed 10 featured girls per day, skipping PROMOTER_ONLY if drawn
+  const PINNED_FEATURED_PER_DAY = 10;
+  
   const dayIndex = pinnedState.dayIndex || 0;
-  const startIdx = (dayIndex * PINNED_FEATURED_PER_DAY) % targetableModels.length;
+  const startIdx = (dayIndex * PINNED_FEATURED_PER_DAY) % allModels.length;
   const featuredGirls = [];
-  for (let i = 0; i < PINNED_FEATURED_PER_DAY; i++) {
-    featuredGirls.push(targetableModels[(startIdx + i) % targetableModels.length]);
+  let cursor = 0;
+  while (featuredGirls.length < PINNED_FEATURED_PER_DAY && cursor < allModels.length) {
+    const candidate = allModels[(startIdx + cursor) % allModels.length];
+    cursor++;
+    if (PROMOTER_ONLY.has(candidate)) continue; // skip promoter-only models
+    featuredGirls.push(candidate);
   }
   
-  console.log(`📌 Today's featured (day ${dayIndex + 1}): ${featuredGirls.join(', ')}`);
+  console.log(`📌 Today's featured (day ${dayIndex + 1}): ${PINNED_FEATURED_PER_DAY} girls from ${targetableModels.length} models: ${featuredGirls.join(', ')}`);
   
-  // For each featured girl, pick 6 accounts to pin on (not their own)
+  // For each featured girl, pick 5 accounts to pin on (not their own)
   // Track history so the same girl doesn't get pinned on the same accounts repeatedly
   const activePosts = [];
   const allOtherModels = [...allModels]; // pool of promoters
@@ -834,6 +912,7 @@ async function sendMassDm(promoterUsername, targetUsername, vaultId, accountId) 
       const retryData = await retry.json();
       const retryQueueId = retryData?.data?.[0]?.id || retryData?.id || null;
       console.log(`📨 Mass DM sent (after retry): ${promoterUsername} → @${targetUsername} (queue: ${retryQueueId})`);
+      addToFeed(massDmFeed, { promoter: promoterUsername, target: targetUsername, queueId: retryQueueId, status: 'sent (retry)' });
       return { success: true, queueId: retryQueueId };
     }
     
@@ -846,6 +925,7 @@ async function sendMassDm(promoterUsername, targetUsername, vaultId, accountId) 
     const data = await res.json();
     const queueId = data?.data?.[0]?.id || data?.id || null;
     console.log(`📨 Mass DM sent: ${promoterUsername} → @${targetUsername} (queue: ${queueId})`);
+    addToFeed(massDmFeed, { promoter: promoterUsername, target: targetUsername, queueId, status: 'sent' });
     return { success: true, queueId };
   } catch (e) {
     console.error(`❌ Mass DM error ${promoterUsername} → @${targetUsername}:`, e);
@@ -1212,6 +1292,20 @@ async function startupRecovery() {
     }
   }
   
+  // Auto-resume ghost tag rotation
+  const shouldAutoResume = await redis.get('s4s:rotation-enabled');
+  if (shouldAutoResume !== false) {
+    console.log('🔄 Auto-resuming ghost tag rotation...');
+    isRunning = true;
+    rotationState.stats.startedAt = new Date().toISOString();
+    
+    const vaultMappings = await loadVaultMappings();
+    const models = Object.keys(vaultMappings);
+    rotationState.dailySchedule = generateDailySchedule(models, vaultMappings);
+    
+    console.log(`📅 Auto-resumed: ${models.length} models, rotation running`);
+  }
+  
   console.log('✅ Startup recovery complete');
 }
 
@@ -1233,6 +1327,7 @@ app.post('/start', async (req, res) => {
   console.log('🚀 Starting rotation service...');
   isRunning = true;
   rotationState.stats.startedAt = new Date().toISOString();
+  await redis.set('s4s:rotation-enabled', true);
   
   // Process any overdue deletes first
   await processOverdueDeletes();
@@ -1254,6 +1349,7 @@ app.post('/start', async (req, res) => {
 app.post('/stop', async (req, res) => {
   console.log('⏹️ Stopping rotation service...');
   isRunning = false;
+  await redis.set('s4s:rotation-enabled', false);
   
   // Process all remaining deletes before stopping
   console.log('🗑️ Cleaning up pending deletes...');
@@ -1400,7 +1496,7 @@ app.get('/dashboard', async (req, res) => {
   res.json({
     config: {
       tagsPerModelPerDay: 57,
-      pinnedFeaturedPerDay: PINNED_FEATURED_PER_DAY,
+      pinnedFeaturedPerDay: 10,
       pinnedPromotersPerFeatured: PINNED_ACCOUNTS_PER_GIRL,
       massDmWindowsPerDay: 12,
       promoterOnly: [...PROMOTER_ONLY],
@@ -1421,7 +1517,7 @@ app.get('/dashboard', async (req, res) => {
       enabled: (await redis.get('s4s:pinned-enabled')) !== false,
       featuredToday: pinnedState.featuredGirls || [],
       dayIndex: pinnedState.dayIndex || 0,
-      totalDaysForFullRotation: Math.ceil(targetable.length / PINNED_FEATURED_PER_DAY),
+      totalDaysForFullRotation: Math.ceil(targetable.length / Math.floor(targetable.length / PINNED_ACCOUNTS_PER_GIRL)),
       activePosts: (pinnedState.activePosts || []).length,
     },
     massDm: {
@@ -1436,19 +1532,32 @@ app.get('/active', async (req, res) => {
   const pending = await getPendingDeletes();
   const now = Date.now();
   
-  const activeTags = pending.map(p => ({
-    promoter: p.promoter,
-    target: p.target,
-    postId: p.postId,
-    createdAt: new Date(p.createdAt).toISOString(),
-    ageSeconds: Math.round((now - p.createdAt) / 1000),
-    deletesIn: Math.max(0, Math.round((p.deleteAt - now) / 1000))
-  })).sort((a, b) => b.ageSeconds - a.ageSeconds);
+  const activeTags = pending
+    .filter(p => (now - p.createdAt) < 10 * 60 * 1000) // Only show tags < 10 min old (ghost tags live ~5 min)
+    .map(p => ({
+      promoter: p.promoter,
+      target: p.target,
+      postId: p.postId,
+      createdAt: new Date(p.createdAt).toISOString(),
+      ageSeconds: Math.round((now - p.createdAt) / 1000),
+      deletesIn: Math.max(0, Math.round((p.deleteAt - now) / 1000))
+    })).sort((a, b) => a.ageSeconds - b.ageSeconds); // newest first
   
   res.json({
     count: activeTags.length,
     tags: activeTags
   });
+});
+
+// Live feed endpoints
+app.get('/feed/mass-dm', (req, res) => {
+  const limit = Math.min(parseInt(req.query.limit) || 50, 100);
+  res.json({ count: massDmFeed.length, feed: massDmFeed.slice(0, limit) });
+});
+
+app.get('/feed/ghost-tags', (req, res) => {
+  const limit = Math.min(parseInt(req.query.limit) || 50, 100);
+  res.json({ count: ghostTagFeed.length, feed: ghostTagFeed.slice(0, limit) });
 });
 
 // Force cleanup endpoint
