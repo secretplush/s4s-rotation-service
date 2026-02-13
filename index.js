@@ -173,6 +173,40 @@ async function loadVaultMappings() {
   }
 }
 
+// vault_mappings_v2: { promoter: { target: { ghost: [vaultId,...], pinned: [...], massDm: [...] } } }
+let cachedVaultMappingsV2 = null;
+let v2LastLoad = 0;
+
+async function loadVaultMappingsV2() {
+  // Cache for 60s
+  if (cachedVaultMappingsV2 && Date.now() - v2LastLoad < 60000) return cachedVaultMappingsV2;
+  try {
+    const data = await redis.get('vault_mappings_v2');
+    if (data && Object.keys(data).length > 0) {
+      cachedVaultMappingsV2 = data;
+      v2LastLoad = Date.now();
+      console.log('Loaded vault_mappings_v2:', Object.keys(data).length, 'promoters');
+      return data;
+    }
+  } catch (e) {
+    console.error('Failed to load vault_mappings_v2:', e);
+  }
+  return null;
+}
+
+// Pick a random vault ID for a specific use, with v1 fallback
+async function getVaultIdForUse(promoter, target, use, v1Mappings) {
+  const v2 = await loadVaultMappingsV2();
+  if (v2 && v2[promoter] && v2[promoter][target]) {
+    const arr = v2[promoter][target][use];
+    if (arr && arr.length > 0) {
+      return arr[Math.floor(Math.random() * arr.length)];
+    }
+  }
+  // Fallback to v1
+  return v1Mappings[promoter]?.[target] || null;
+}
+
 async function loadModelAccounts() {
   try {
     const res = await fetch(`${OF_API_BASE}/accounts`, {
@@ -325,7 +359,7 @@ async function runRotationCycle() {
       if (sched.executed) continue;
       if (now < sched.scheduledTime) continue;
       
-      const vaultId = vaultMappings[model]?.[sched.target];
+      const vaultId = await getVaultIdForUse(model, sched.target, 'ghost', vaultMappings);
       if (!vaultId) {
         console.log(`⚠️ No vault ID for ${model} → ${sched.target}`);
         sched.executed = true;
@@ -578,7 +612,7 @@ async function runPinnedPostRotation() {
     
     for (const promoter of promoters) {
       const accountId = accountMap[promoter];
-      const vaultId = vaultMappings[promoter]?.[featured];
+      const vaultId = await getVaultIdForUse(promoter, featured, 'pinned', vaultMappings);
       
       if (!accountId || !vaultId) {
         console.log(`⚠️ Missing account/vault for ${promoter} → ${featured}`);
@@ -990,8 +1024,8 @@ async function _processMassDmScheduleInner() {
         continue;
       }
       
-      // Resolve vault ID if not cached
-      const vaultId = entry.vaultId || vaultMappings[model]?.[entry.target];
+      // Resolve vault ID — prefer v2 random selection, fall back to cached or v1
+      const vaultId = await getVaultIdForUse(model, entry.target, 'massDm', vaultMappings) || entry.vaultId;
       if (!vaultId) {
         console.log(`⚠️ No vault ID for mass DM: ${model} → ${entry.target}`);
         entry.failed = true;
