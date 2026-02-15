@@ -18,7 +18,7 @@ const redis = new Redis({
 });
 
 // Chatbot config
-const ANTHROPIC_API_KEY = process.env.ANTHROPIC_API_KEY || 'sk-ant-api03-sRq6SNQKZ_3yw5OdblM5KuHiJMcFVVxJO4x7Zl95I15PiCngGl25IW0VIEjuYVNR0HfPOhJCLH2a9jXu0jYyWg-xFaOzwAA';
+const ANTHROPIC_API_KEY = process.env.ANTHROPIC_API_KEY || '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';
 const MILLIE_ACCOUNT_ID = 'acct_ebca85077e0a4b7da04cf14176466411';
 const MILLIE_USERNAME = 'milliexhart';
 const chatbotStats = { messagesReceived: 0, messagesSent: 0, ppvsSent: 0, errors: 0 };
