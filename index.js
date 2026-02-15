@@ -1563,15 +1563,16 @@ async function sendMassDm(promoterUsername, targetUsername, vaultId, accountId) 
   
   try {
     // Build excluded lists: SFS exclude(s) + New Sub 48hr + Active Chat
+    // NOTE: OF API docs say excludedLists takes array<string> — send as strings
     const excludedLists = [];
     const sfsIds = sfsExcludeLists[promoterUsername];
     if (sfsIds) {
       const ids = Array.isArray(sfsIds) ? sfsIds : [sfsIds];
-      for (const id of ids) excludedLists.push(Number(id));
+      for (const id of ids) excludedLists.push(String(id));
     }
     const autoLists = excludeListIds[promoterUsername] || {};
-    if (autoLists.newSub) excludedLists.push(Number(autoLists.newSub));
-    if (autoLists.activeChat) excludedLists.push(Number(autoLists.activeChat));
+    if (autoLists.newSub) excludedLists.push(String(autoLists.newSub));
+    if (autoLists.activeChat) excludedLists.push(String(autoLists.activeChat));
 
     const body = {
       text: caption,
@@ -1580,7 +1581,7 @@ async function sendMassDm(promoterUsername, targetUsername, vaultId, accountId) 
       ...(excludedLists.length > 0 ? { excludedLists } : {}),
     };
     
-    console.log(`📨 Mass DM ${promoterUsername} → @${targetUsername} | exclude: ${excludedLists.length > 0 ? excludedLists.join(',') : 'NONE'}`);
+    console.log(`📨 Mass DM ${promoterUsername} → @${targetUsername} | exclude: ${excludedLists.length > 0 ? JSON.stringify(excludedLists) : 'NONE'}`);
     const res = await fetch(`${OF_API_BASE}/${accountId}/mass-messaging`, {
       method: 'POST',
       headers: {
