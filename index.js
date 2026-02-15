@@ -852,87 +852,98 @@ async function generateMassDmSchedule() {
   console.log(`📨 Mass DM schedule generated: ${allModels.length} models × ${intervalMinutes.toFixed(1)} min intervals × ${MASS_DM_WINDOWS_UTC.length} windows = ${totalDms} DMs for ${todayStr}`);
 }
 
-// "NEW SFS Exclude" list IDs per account (username → list ID)
+// SFS Exclude list IDs per account (username → array of list IDs)
+// Models with multiple exclude lists get ALL of them excluded
 // Hardcoded fallback — seeded to Redis on startup, then read from Redis
 const SFS_EXCLUDE_LISTS_HARDCODED = {
-  // --- Original 30 (working lists) ---
-  "skyyroseee": "1261988346",
-  "yourrfavblondie": "1261988351",
-  "thesarasky": "1261988365",
-  "chelseapaige": "1261988375",
-  "dollyrhodesss": "1261988388",
-  "lilyyymonroee": "1261498701",
-  "lindamarievip": "1260524216",
-  "laceythomass": "1260552953",
-  "kaliblakexo": "1261524694",
-  "jessicaparkerrr": "1262027725",  // was 1261988558 (wrong acct), real: "New SFS Exclude"
-  "tyybabyy": "1261988505",
-  "itsmealexisrae": "1261988522",
-  "lolaxmae": "1262020881",  // was 1261988531 (wrong acct), real: "New SFS Exclude"
-  "rebeccabrownn": "1260548516",  // was 1262027725 (wrong acct), real: "New SFS Exclude"
-  "milliexhart": "1256700429",
-  "zoepriceee": "1262020857",
-  "novaleighh": "1257095557",
-  "lucymonroee": "1258839857",
-  "jackiesmithh": "1262020852",  // was 1260548516 (wrong acct), real: "New SFS Exclude"
-  "brookeewest": "1256700500",  // was 1262020881 (wrong acct), real: "New SFS Exclude"
-  "chloeecavalli": "1262020825",
-  "sadieeblake": "1262020580",
-  "lolasinclairr": "1261988697",
-  "maddieharperr": "1256821855",
-  "zoeemonroe": "1262020818",
-  "biancaawoods": "1261988726",  // was 1262025288 (wrong acct), real: "NEW SFS Exclude"
-  "aviannaarose": "1256700115",
-  // --- NEW "SFS Exclude List 2.0" (created 2026-02-12) ---
-  "andreaelizabethxo": "1262454105",
-  "brittanyhalden": "1262454139",
-  "caddieissues": "1262454162",
-  "caraaawesley": "1262454169",
-  "carlyyyb": "1262454179",
-  "chloecollinsxo": "1262454197",
-  "ellieharperr": "1262454215",
-  "giselemars": "1262454229",
-  "kaitlynxbeckham": "1262454253",
-  "keelydavidson": "1262454290",
-  "kybabyrae": "1262454313",
-  "lilywestt": "1262454328",
-  "madsabigail": "1262454361",
-  "nickyecker": "1262454374",
-  "rachelxbennett": "1262454380",
-  "saralovexx": "1262561090",  // was 1262454399 (didn't exist), real: "NEW SFS exclude 2.0"
-  "taylorskully": "1262454416",
-  "tessaxsloane": "1262454430",
-  "winterclaire": "1262454452",
-  "xoharperr": "1262458622",  // was 1262454473 (didn't exist), real: "❌New SFS Exclude 2.0 list"
-  // --- Fixed (were broken, now have own lists) ---
-  "oliviabrookess": "1262454505",
-  "chloecookk": "1262454515",
-  "ayaaann": "1262454532",
-  // --- Previously missing, now created (2026-02-15) ---
-  "itstaylorbrooke": "1263113220",
-  "juliaabrooks": "1262696979",
-  "isabelleegracee": "1262696966",
-  "sarakinsley": "1263113230",
-  "sophiamurphy": "1262696990",
-  "camilaxcruz": "1262696992",
-  "itsskylarrae": "1262696995",
+  "skyyroseee": ["1261988346"],
+  "yourrfavblondie": ["1261988351"],
+  "thesarasky": ["1261988365", "1262483474"],
+  "chelseapaige": ["1261988375"],
+  "dollyrhodesss": ["1261988388"],
+  "lilyyymonroee": ["1261498701", "1262483464"],
+  "lindamarievip": ["1260524216"],
+  "laceythomass": ["1260552953"],
+  "kaliblakexo": ["1261524694"],
+  "jessicaparkerrr": ["1262027725"],
+  "tyybabyy": ["1261988505"],
+  "itsmealexisrae": ["1261988522"],
+  "lolaxmae": ["1262020881"],
+  "rebeccabrownn": ["1260548516", "1262467376"],
+  "milliexhart": ["1256700429"],
+  "zoepriceee": ["1262020857"],
+  "novaleighh": ["1257095557", "1262226593"],
+  "lucymonroee": ["1258839857"],
+  "jackiesmithh": ["1262020852"],
+  "brookeewest": ["1256700500"],
+  "chloeecavalli": ["1262020825"],
+  "sadieeblake": ["1262020580"],
+  "lolasinclairr": ["1261988697", "1256700311"],
+  "maddieharperr": ["1256821855"],
+  "zoeemonroe": ["1262020818", "1257390577"],
+  "biancaawoods": ["1261988726"],
+  "aviannaarose": ["1256700115"],
+  "andreaelizabethxo": ["1262454105", "1260567928"],
+  "brittanyhalden": ["1262454139", "1262020795"],
+  "caddieissues": ["1262454162"],
+  "caraaawesley": ["1262454169"],
+  "carlyyyb": ["1262454179"],
+  "chloecollinsxo": ["1262454197", "1231885718"],
+  "ellieharperr": ["1262454215"],
+  "giselemars": ["1262454229"],
+  "kaitlynxbeckham": ["1262454253"],
+  "keelydavidson": ["1262454290"],
+  "kybabyrae": ["1262454313"],
+  "lilywestt": ["1262454328"],
+  "madsabigail": ["1262454361"],
+  "nickyecker": ["1262454374", "1262032687"],
+  "rachelxbennett": ["1262454380"],
+  "saralovexx": ["1262561090", "1262025765"],
+  "taylorskully": ["1262454416"],
+  "tessaxsloane": ["1262454430"],
+  "winterclaire": ["1262454452", "1207065982"],
+  "xoharperr": ["1262458622", "1262020806"],
+  "oliviabrookess": ["1262454505"],
+  "chloecookk": ["1262454515", "1260547948"],
+  "ayaaann": ["1262454532", "1256700684"],
+  "itstaylorbrooke": ["1263113220", "1263002461"],
+  "juliaabrooks": ["1262696979"],
+  "isabelleegracee": ["1262696966", "1225239940"],
+  "sarakinsley": ["1263113230", "1263001724"],
+  "sophiamurphy": ["1262696990"],
+  "camilaxcruz": ["1262696992"],
+  "itsskylarrae": ["1262696995"],
 };
 
 // Dynamic SFS exclude lists from Redis (loaded on startup, refreshed periodically)
+// Values are arrays of list ID strings: { username: ["id1", "id2"] }
 let sfsExcludeLists = { ...SFS_EXCLUDE_LISTS_HARDCODED };
 
 async function loadSfsExcludeLists() {
   try {
-    const data = await redis.hgetall('sfs_exclude_lists');
+    // Force re-seed if data is old format (v2 = multi-list arrays)
+    const version = await redis.get('sfs_exclude_lists_version');
+    const data = version === 'v2' ? await redis.hgetall('sfs_exclude_lists') : null;
     if (data && Object.keys(data).length > 0) {
-      sfsExcludeLists = data;
-      console.log(`📋 Loaded ${Object.keys(data).length} SFS exclude lists from Redis`);
+      // Parse JSON arrays from Redis (stored as JSON strings)
+      const parsed = {};
+      for (const [k, v] of Object.entries(data)) {
+        try { parsed[k] = JSON.parse(v); } catch { parsed[k] = [v]; }
+      }
+      sfsExcludeLists = parsed;
+      console.log(`📋 Loaded ${Object.keys(parsed).length} SFS exclude lists from Redis`);
     } else {
-      // Seed Redis from hardcoded lists
+      // Seed Redis from hardcoded lists (store as JSON strings)
       console.log('📋 Seeding SFS exclude lists to Redis...');
-      await redis.hset('sfs_exclude_lists', SFS_EXCLUDE_LISTS_HARDCODED);
+      const serialized = {};
+      for (const [k, v] of Object.entries(SFS_EXCLUDE_LISTS_HARDCODED)) {
+        serialized[k] = JSON.stringify(v);
+      }
+      await redis.del('sfs_exclude_lists');
+      await redis.hset('sfs_exclude_lists', serialized);
+      await redis.set('sfs_exclude_lists_version', 'v2');
       sfsExcludeLists = { ...SFS_EXCLUDE_LISTS_HARDCODED };
-      console.log(`📋 Seeded ${Object.keys(SFS_EXCLUDE_LISTS_HARDCODED).length} SFS exclude lists to Redis`);
+      console.log(`📋 Seeded ${Object.keys(SFS_EXCLUDE_LISTS_HARDCODED).length} SFS exclude lists to Redis (v2 multi-list)`);
     }
   } catch (e) {
     console.error('❌ Failed to load SFS exclude lists from Redis, using hardcoded:', e.message);
@@ -1281,10 +1292,13 @@ async function sendMassDm(promoterUsername, targetUsername, vaultId, accountId) 
   const caption = getMassDmCaption(targetUsername);
   
   try {
-    // Build excluded lists: SFS exclude + New Sub 48hr + Active Chat
+    // Build excluded lists: SFS exclude(s) + New Sub 48hr + Active Chat
     const excludedLists = [];
-    const excludeListId = sfsExcludeLists[promoterUsername];
-    if (excludeListId) excludedLists.push(Number(excludeListId));
+    const sfsIds = sfsExcludeLists[promoterUsername];
+    if (sfsIds) {
+      const ids = Array.isArray(sfsIds) ? sfsIds : [sfsIds];
+      for (const id of ids) excludedLists.push(Number(id));
+    }
     const autoLists = excludeListIds[promoterUsername] || {};
     if (autoLists.newSub) excludedLists.push(Number(autoLists.newSub));
     if (autoLists.activeChat) excludedLists.push(Number(autoLists.activeChat));
