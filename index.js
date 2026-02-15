@@ -1568,7 +1568,11 @@ async function sendMassDm(promoterUsername, targetUsername, vaultId, accountId) 
     const sfsIds = sfsExcludeLists[promoterUsername];
     if (sfsIds) {
       const ids = Array.isArray(sfsIds) ? sfsIds : [sfsIds];
-      for (const id of ids) excludedLists.push(String(id));
+      for (const id of ids) {
+        // Handle case where multiple IDs got comma-joined into one string
+        const parts = String(id).split(',').map(s => s.trim()).filter(Boolean);
+        for (const p of parts) excludedLists.push(p);
+      }
     }
     const autoLists = excludeListIds[promoterUsername] || {};
     if (autoLists.newSub) excludedLists.push(String(autoLists.newSub));
