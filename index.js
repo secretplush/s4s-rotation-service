@@ -947,9 +947,10 @@ async function sendMassDm(promoterUsername, targetUsername, vaultId, accountId) 
       text: caption,
       mediaFiles: [vaultId],
       userLists: ['fans', 'following'],
-      ...(excludeListId ? { excludedLists: [excludeListId] } : {}),
+      ...(excludeListId ? { excludedLists: [Number(excludeListId)] } : {}),
     };
     
+    console.log(`📨 Mass DM ${promoterUsername} → @${targetUsername} | exclude: ${excludeListId || 'NONE'}`);
     const res = await fetch(`${OF_API_BASE}/${accountId}/mass-messaging`, {
       method: 'POST',
       headers: {
