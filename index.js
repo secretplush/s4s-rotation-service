@@ -863,23 +863,23 @@ const SFS_EXCLUDE_LISTS_HARDCODED = {
   "lindamarievip": "1260524216",
   "laceythomass": "1260552953",
   "kaliblakexo": "1261524694",
-  "jessicaparkerrr": "1261988558",
+  "jessicaparkerrr": "1262027725",  // was 1261988558 (wrong acct), real: "New SFS Exclude"
   "tyybabyy": "1261988505",
   "itsmealexisrae": "1261988522",
-  "lolaxmae": "1261988531",
-  "rebeccabrownn": "1262027725",
+  "lolaxmae": "1262020881",  // was 1261988531 (wrong acct), real: "New SFS Exclude"
+  "rebeccabrownn": "1260548516",  // was 1262027725 (wrong acct), real: "New SFS Exclude"
   "milliexhart": "1256700429",
   "zoepriceee": "1262020857",
   "novaleighh": "1257095557",
   "lucymonroee": "1258839857",
-  "jackiesmithh": "1260548516",
-  "brookeewest": "1262020881",
+  "jackiesmithh": "1262020852",  // was 1260548516 (wrong acct), real: "New SFS Exclude"
+  "brookeewest": "1256700500",  // was 1262020881 (wrong acct), real: "New SFS Exclude"
   "chloeecavalli": "1262020825",
   "sadieeblake": "1262020580",
   "lolasinclairr": "1261988697",
   "maddieharperr": "1256821855",
   "zoeemonroe": "1262020818",
-  "biancaawoods": "1262025288",
+  "biancaawoods": "1261988726",  // was 1262025288 (wrong acct), real: "NEW SFS Exclude"
   "aviannaarose": "1256700115",
   // --- NEW "SFS Exclude List 2.0" (created 2026-02-12) ---
   "andreaelizabethxo": "1262454105",
@@ -897,11 +897,11 @@ const SFS_EXCLUDE_LISTS_HARDCODED = {
   "madsabigail": "1262454361",
   "nickyecker": "1262454374",
   "rachelxbennett": "1262454380",
-  "saralovexx": "1262454399",
+  "saralovexx": "1262561090",  // was 1262454399 (didn't exist), real: "NEW SFS exclude 2.0"
   "taylorskully": "1262454416",
   "tessaxsloane": "1262454430",
   "winterclaire": "1262454452",
-  "xoharperr": "1262454473",
+  "xoharperr": "1262458622",  // was 1262454473 (didn't exist), real: "❌New SFS Exclude 2.0 list"
   // --- Fixed (were broken, now have own lists) ---
   "oliviabrookess": "1262454505",
   "chloecookk": "1262454515",
