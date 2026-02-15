@@ -906,6 +906,14 @@ const SFS_EXCLUDE_LISTS_HARDCODED = {
   "oliviabrookess": "1262454505",
   "chloecookk": "1262454515",
   "ayaaann": "1262454532",
+  // --- Previously missing, now created (2026-02-15) ---
+  "itstaylorbrooke": "1263113220",
+  "juliaabrooks": "1262696979",
+  "isabelleegracee": "1262696966",
+  "sarakinsley": "1263113230",
+  "sophiamurphy": "1262696990",
+  "camilaxcruz": "1262696992",
+  "itsskylarrae": "1262696995",
 };
 
 // Dynamic SFS exclude lists from Redis (loaded on startup, refreshed periodically)
