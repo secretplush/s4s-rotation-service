@@ -1563,7 +1563,7 @@ async function sendMassDm(promoterUsername, targetUsername, vaultId, accountId) 
   
   try {
     // Build excluded lists: SFS exclude(s) + New Sub 48hr + Active Chat
-    // NOTE: OF API docs say excludedLists takes array<string> — send as strings
+    // OF API accepts mixed: string names ("fans") and numeric IDs (1234567890)
     const excludedLists = [];
     const sfsIds = sfsExcludeLists[promoterUsername];
     if (sfsIds) {
@@ -1571,12 +1571,12 @@ async function sendMassDm(promoterUsername, targetUsername, vaultId, accountId) 
       for (const id of ids) {
         // Handle case where multiple IDs got comma-joined into one string
         const parts = String(id).split(',').map(s => s.trim()).filter(Boolean);
-        for (const p of parts) excludedLists.push(p);
+        for (const p of parts) excludedLists.push(Number(p));
       }
     }
     const autoLists = excludeListIds[promoterUsername] || {};
-    if (autoLists.newSub) excludedLists.push(String(autoLists.newSub));
-    if (autoLists.activeChat) excludedLists.push(String(autoLists.activeChat));
+    if (autoLists.newSub) excludedLists.push(Number(autoLists.newSub));
+    if (autoLists.activeChat) excludedLists.push(Number(autoLists.activeChat));
 
     const body = {
       text: caption,
