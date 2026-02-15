@@ -32,6 +32,8 @@ const REDIS_KEYS = {
   PENDING_DELETES: 's4s:pending-deletes',
   ROTATION_STATE: 's4s:rotation-state',
   SCHEDULE: 's4s:schedule',
+  NEW_SUB_LISTS: 's4s:newsub-lists',       // hash: username → listId
+  ACTIVE_CHAT_LISTS: 's4s:activechat-lists', // hash: username → listId
 };
 
 // In-memory state
@@ -938,19 +940,363 @@ async function loadSfsExcludeLists() {
   }
 }
 
+// === AUTO-MANAGED EXCLUDE LISTS ===
+// "🆕 New Sub 48hr" and "💬 Active Chat" lists, auto-managed via webhooks + cron
+
+// In-memory cache of list IDs: { username: { newSub: listId, activeChat: listId } }
+let excludeListIds = {};
+
+async function loadExcludeListIds() {
+  try {
+    const newSubData = await redis.hgetall(REDIS_KEYS.NEW_SUB_LISTS) || {};
+    const activeChatData = await redis.hgetall(REDIS_KEYS.ACTIVE_CHAT_LISTS) || {};
+    excludeListIds = {};
+    const allUsernames = new Set([...Object.keys(newSubData), ...Object.keys(activeChatData)]);
+    for (const u of allUsernames) {
+      excludeListIds[u] = {
+        newSub: newSubData[u] || null,
+        activeChat: activeChatData[u] || null,
+      };
+    }
+    console.log(`📋 Loaded exclude list IDs for ${allUsernames.size} accounts`);
+  } catch (e) {
+    console.error('Failed to load exclude list IDs:', e.message);
+  }
+}
+
+// Build reverse map: account_id → username (cached)
+let accountIdToUsername = {};
+
+async function buildAccountIdMap() {
+  try {
+    const res = await fetch(`${OF_API_BASE}/accounts`, {
+      headers: { 'Authorization': `Bearer ${OF_API_KEY}` }
+    });
+    const accounts = await res.json();
+    accountIdToUsername = {};
+    for (const acct of accounts) {
+      if (acct.onlyfans_username && acct.id) {
+        accountIdToUsername[acct.id] = acct.onlyfans_username;
+      }
+    }
+    console.log(`📋 Built account ID→username map: ${Object.keys(accountIdToUsername).length} accounts`);
+  } catch (e) {
+    console.error('Failed to build account ID map:', e.message);
+  }
+}
+
+async function ensureExcludeListsForAccount(username, accountId) {
+  const existing = excludeListIds[username] || {};
+  let changed = false;
+
+  // Check/create "🆕 New Sub 48hr" list
+  if (!existing.newSub) {
+    try {
+      const res = await fetch(`${OF_API_BASE}/${accountId}/user-lists`, {
+        method: 'POST',
+        headers: {
+          'Authorization': `Bearer ${OF_API_KEY}`,
+          'Content-Type': 'application/json',
+        },
+        body: JSON.stringify({ name: '🆕 New Sub 48hr' }),
+      });
+      if (res.ok) {
+        const data = await res.json();
+        const listId = String(data.id || data.data?.id);
+        existing.newSub = listId;
+        await redis.hset(REDIS_KEYS.NEW_SUB_LISTS, { [username]: listId });
+        console.log(`✅ Created "🆕 New Sub 48hr" list for ${username}: ${listId}`);
+        changed = true;
+      } else {
+        const err = await res.text();
+        // If list already exists, try to find it
+        console.error(`Failed to create New Sub list for ${username}: ${err}`);
+      }
+    } catch (e) {
+      console.error(`Error creating New Sub list for ${username}:`, e.message);
+    }
+    await new Promise(r => setTimeout(r, 1000));
+  }
+
+  // Check/create "💬 Active Chat" list
+  if (!existing.activeChat) {
+    try {
+      const res = await fetch(`${OF_API_BASE}/${accountId}/user-lists`, {
+        method: 'POST',
+        headers: {
+          'Authorization': `Bearer ${OF_API_KEY}`,
+          'Content-Type': 'application/json',
+        },
+        body: JSON.stringify({ name: '💬 Active Chat' }),
+      });
+      if (res.ok) {
+        const data = await res.json();
+        const listId = String(data.id || data.data?.id);
+        existing.activeChat = listId;
+        await redis.hset(REDIS_KEYS.ACTIVE_CHAT_LISTS, { [username]: listId });
+        console.log(`✅ Created "💬 Active Chat" list for ${username}: ${listId}`);
+        changed = true;
+      } else {
+        const err = await res.text();
+        console.error(`Failed to create Active Chat list for ${username}: ${err}`);
+      }
+    } catch (e) {
+      console.error(`Error creating Active Chat list for ${username}:`, e.message);
+    }
+    await new Promise(r => setTimeout(r, 1000));
+  }
+
+  excludeListIds[username] = existing;
+  return existing;
+}
+
+async function ensureAllExcludeLists() {
+  console.log('📋 Ensuring exclude lists exist on all accounts...');
+  const accountMap = await loadModelAccounts();
+  await buildAccountIdMap();
+  let created = 0;
+  for (const [username, accountId] of Object.entries(accountMap)) {
+    const before = excludeListIds[username] || {};
+    const after = await ensureExcludeListsForAccount(username, accountId);
+    if (!before.newSub && after.newSub) created++;
+    if (!before.activeChat && after.activeChat) created++;
+  }
+  console.log(`📋 Exclude lists check complete. Created ${created} new lists.`);
+}
+
+// Cron: Clean up expired New Sub 48hr entries (runs every hour)
+async function cleanupNewSubExcludes() {
+  console.log('🆕 Cleaning up expired New Sub 48hr entries...');
+  const now = Date.now();
+  const FORTY_EIGHT_HOURS = 48 * 60 * 60 * 1000;
+  const accountMap = await loadModelAccounts();
+  let removed = 0;
+
+  for (const [username, accountId] of Object.entries(accountMap)) {
+    const lists = excludeListIds[username];
+    if (!lists?.newSub) continue;
+
+    // Scan Redis for newsub:{username}:* keys
+    // Upstash doesn't support SCAN, so we track fan IDs in a set
+    const trackedFans = await redis.smembers(`newsub:${username}:_index`) || [];
+    for (const fanId of trackedFans) {
+      const ts = await redis.get(`newsub:${username}:${fanId}`);
+      if (!ts) continue;
+      if (now - Number(ts) >= FORTY_EIGHT_HOURS) {
+        // Remove from list
+        try {
+          await fetch(`${OF_API_BASE}/${accountId}/user-lists/${lists.newSub}/users/${fanId}`, {
+            method: 'DELETE',
+            headers: { 'Authorization': `Bearer ${OF_API_KEY}` },
+          });
+          await redis.del(`newsub:${username}:${fanId}`);
+          await redis.srem(`newsub:${username}:_index`, fanId);
+          removed++;
+          console.log(`🆕 Removed expired fan ${fanId} from New Sub list for ${username}`);
+        } catch (e) {
+          console.error(`Error removing fan ${fanId} from New Sub list:`, e.message);
+        }
+        await new Promise(r => setTimeout(r, 500));
+      }
+    }
+  }
+  console.log(`🆕 Cleanup complete: removed ${removed} expired entries`);
+}
+
+// Cron: Clean up expired Active Chat entries (runs every 15 min)
+async function cleanupActiveChatExcludes() {
+  console.log('💬 Cleaning up expired Active Chat entries...');
+  const now = Date.now();
+  const TWO_HOURS = 2 * 60 * 60 * 1000;
+  const accountMap = await loadModelAccounts();
+  let removed = 0;
+
+  for (const [username, accountId] of Object.entries(accountMap)) {
+    const lists = excludeListIds[username];
+    if (!lists?.activeChat) continue;
+
+    const trackedFans = await redis.smembers(`activechat:${username}:_index`) || [];
+    for (const fanId of trackedFans) {
+      const ts = await redis.get(`activechat:${username}:${fanId}`);
+      if (!ts) continue;
+      if (now - Number(ts) >= TWO_HOURS) {
+        try {
+          await fetch(`${OF_API_BASE}/${accountId}/user-lists/${lists.activeChat}/users/${fanId}`, {
+            method: 'DELETE',
+            headers: { 'Authorization': `Bearer ${OF_API_KEY}` },
+          });
+          await redis.del(`activechat:${username}:${fanId}`);
+          await redis.srem(`activechat:${username}:_index`, fanId);
+          removed++;
+          console.log(`💬 Removed expired fan ${fanId} from Active Chat list for ${username}`);
+        } catch (e) {
+          console.error(`Error removing fan ${fanId} from Active Chat list:`, e.message);
+        }
+        await new Promise(r => setTimeout(r, 500));
+      }
+    }
+  }
+  console.log(`💬 Cleanup complete: removed ${removed} expired entries`);
+}
+
+// Add fan to "🆕 New Sub 48hr" list (with index tracking for cleanup)
+async function addNewSubExcludeTracked(username, accountId, fanId) {
+  const lists = excludeListIds[username];
+  if (!lists?.newSub) return;
+
+  try {
+    const res = await fetch(`${OF_API_BASE}/${accountId}/user-lists/${lists.newSub}/users`, {
+      method: 'POST',
+      headers: {
+        'Authorization': `Bearer ${OF_API_KEY}`,
+        'Content-Type': 'application/json',
+      },
+      body: JSON.stringify({ userIds: [Number(fanId)] }),
+    });
+    if (res.ok) {
+      await redis.set(`newsub:${username}:${fanId}`, Date.now());
+      await redis.sadd(`newsub:${username}:_index`, String(fanId));
+      console.log(`🆕 Added fan ${fanId} to New Sub 48hr list for ${username}`);
+    } else {
+      const err = await res.text();
+      console.error(`Failed to add fan ${fanId} to New Sub list for ${username}: ${err}`);
+    }
+  } catch (e) {
+    console.error(`Error adding fan to New Sub list:`, e.message);
+  }
+}
+
+async function addActiveChatExcludeTracked(username, accountId, fanId) {
+  const lists = excludeListIds[username];
+  if (!lists?.activeChat) return;
+
+  const redisKey = `activechat:${username}:${fanId}`;
+  const existing = await redis.get(redisKey);
+
+  await redis.set(redisKey, Date.now());
+  await redis.sadd(`activechat:${username}:_index`, String(fanId));
+
+  if (!existing) {
+    try {
+      const res = await fetch(`${OF_API_BASE}/${accountId}/user-lists/${lists.activeChat}/users`, {
+        method: 'POST',
+        headers: {
+          'Authorization': `Bearer ${OF_API_KEY}`,
+          'Content-Type': 'application/json',
+        },
+        body: JSON.stringify({ userIds: [Number(fanId)] }),
+      });
+      if (res.ok) {
+        console.log(`💬 Added fan ${fanId} to Active Chat list for ${username}`);
+      } else {
+        const err = await res.text();
+        console.error(`Failed to add fan ${fanId} to Active Chat list for ${username}: ${err}`);
+      }
+    } catch (e) {
+      console.error(`Error adding fan to Active Chat list:`, e.message);
+    }
+  } else {
+    console.log(`💬 Updated activity timestamp for fan ${fanId} on ${username}`);
+  }
+}
+
+// Cron schedules for cleanup
+cron.schedule('0 * * * *', cleanupNewSubExcludes);       // Every hour
+cron.schedule('*/15 * * * *', cleanupActiveChatExcludes); // Every 15 min
+
+// === WEBHOOK ENDPOINT ===
+// Receives events from OnlyFans API webhooks
+// Configure webhook URL in OnlyFans API dashboard: https://<your-domain>/webhooks/onlyfans
+
+app.post('/webhooks/onlyfans', async (req, res) => {
+  // Respond immediately
+  res.status(200).json({ ok: true });
+
+  const { event, account_id, payload } = req.body;
+  if (!event || !account_id) return;
+
+  const username = accountIdToUsername[account_id];
+  if (!username) {
+    console.log(`⚠️ Webhook: unknown account_id ${account_id}`);
+    return;
+  }
+
+  // Resolve accountId (numeric) for API calls
+  const accountMap = await loadModelAccounts();
+  const numericAccountId = accountMap[username];
+  if (!numericAccountId) return;
+
+  try {
+    if (event === 'subscriptions.new') {
+      // New subscriber → add to "🆕 New Sub 48hr" list
+      const fanId = payload?.user_id || payload?.user?.id;
+      if (fanId) {
+        await addNewSubExcludeTracked(username, numericAccountId, fanId);
+      }
+    }
+
+    if (event === 'messages.received') {
+      // Fan sent a direct message → add to "💬 Active Chat" list
+      // SKIP mass messages / queue messages
+      if (payload?.isFromQueue) return;
+      const fanId = payload?.fromUser?.id;
+      if (fanId) {
+        await addActiveChatExcludeTracked(username, numericAccountId, fanId);
+      }
+    }
+
+    if (event === 'messages.sent') {
+      // Model sent a direct message → add fan to "💬 Active Chat" list
+      // SKIP mass messages / queue messages
+      if (payload?.isFromQueue) return;
+      const fanId = payload?.toUser?.id;
+      if (fanId) {
+        await addActiveChatExcludeTracked(username, numericAccountId, fanId);
+      }
+    }
+  } catch (e) {
+    console.error(`Webhook processing error (${event}):`, e.message);
+  }
+});
+
+// === EXCLUDE LIST STATUS ENDPOINT ===
+app.get('/exclude-lists', async (req, res) => {
+  const accountMap = await loadModelAccounts();
+  const status = {};
+  for (const username of Object.keys(accountMap)) {
+    const lists = excludeListIds[username] || {};
+    const newSubIndex = await redis.smembers(`newsub:${username}:_index`) || [];
+    const activeChatIndex = await redis.smembers(`activechat:${username}:_index`) || [];
+    status[username] = {
+      newSubListId: lists.newSub || null,
+      activeChatListId: lists.activeChat || null,
+      newSubTracked: newSubIndex.length,
+      activeChatTracked: activeChatIndex.length,
+    };
+  }
+  res.json({ accounts: status, totalAccounts: Object.keys(status).length });
+});
+
 async function sendMassDm(promoterUsername, targetUsername, vaultId, accountId) {
   const caption = getMassDmCaption(targetUsername);
   
   try {
+    // Build excluded lists: SFS exclude + New Sub 48hr + Active Chat
+    const excludedLists = [];
     const excludeListId = sfsExcludeLists[promoterUsername];
+    if (excludeListId) excludedLists.push(Number(excludeListId));
+    const autoLists = excludeListIds[promoterUsername] || {};
+    if (autoLists.newSub) excludedLists.push(Number(autoLists.newSub));
+    if (autoLists.activeChat) excludedLists.push(Number(autoLists.activeChat));
+
     const body = {
       text: caption,
       mediaFiles: [vaultId],
       userLists: ['fans', 'following'],
-      ...(excludeListId ? { excludedLists: [Number(excludeListId)] } : {}),
+      ...(excludedLists.length > 0 ? { excludedLists } : {}),
     };
     
-    console.log(`📨 Mass DM ${promoterUsername} → @${targetUsername} | exclude: ${excludeListId || 'NONE'}`);
+    console.log(`📨 Mass DM ${promoterUsername} → @${targetUsername} | exclude: ${excludedLists.length > 0 ? excludedLists.join(',') : 'NONE'}`);
     const res = await fetch(`${OF_API_BASE}/${accountId}/mass-messaging`, {
       method: 'POST',
       headers: {
@@ -1718,9 +2064,15 @@ app.listen(PORT, async () => {
   console.log(`   POST /mass-dm/enable  - Enable mass DM system`);
   console.log(`   POST /mass-dm/disable - Disable mass DM system`);
   console.log(`   POST /mass-dm/run     - Manually trigger next pending DM`);
+  console.log(`   GET  /exclude-lists   - View auto-managed exclude list status`);
+  console.log(`   POST /webhooks/onlyfans - Webhook endpoint for OF API`);
   
   // Load SFS exclude lists from Redis (seeds if needed)
   await loadSfsExcludeLists();
+  
+  // Load and ensure auto-managed exclude lists
+  await loadExcludeListIds();
+  await ensureAllExcludeLists();
   
   // Run startup recovery
   await startupRecovery();
