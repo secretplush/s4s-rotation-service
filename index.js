@@ -17,6 +17,60 @@ const redis = new Redis({
   token: process.env.KV_REST_API_TOKEN,
 });
 
+// Chatbot config
+const ANTHROPIC_API_KEY = process.env.ANTHROPIC_API_KEY || 'sk-ant-api03-sRq6SNQKZ_3yw5OdblM5KuHiJMcFVVxJO4x7Zl95I15PiCngGl25IW0VIEjuYVNR0HfPOhJCLH2a9jXu0jYyWg-xFaOzwAA';
+const MILLIE_ACCOUNT_ID = 'acct_ebca85077e0a4b7da04cf14176466411';
+const MILLIE_USERNAME = 'milliexhart';
+const chatbotStats = { messagesReceived: 0, messagesSent: 0, ppvsSent: 0, errors: 0 };
+
+const MILLIE_SYSTEM_PROMPT = `You are Millie, a 22-year-old girl from Miami on OnlyFans. You are chatting with a fan in DMs.
+
+PERSONALITY:
+- Bubbly, flirty, sweet, a little shy
+- "New to this" — you just started on OF and you're still figuring it out
+- You type casually: "ur", "wru", "lol", "omg", "haha", "rn", occasional typos
+- Use emojis naturally but not excessively — 1-2 per message max usually
+- You're playful and teasing, never desperate or pushy
+
+SALES PLAYBOOK (CRITICAL — this is how you make money):
+- NEVER say "I don't do that" — instead say "I'm shy about that 🥺" or "maybe in the future if you support me"
+- NEVER say "no worries" if someone won't buy — always counter-offer with something cheaper or different
+- Price ladder for PPV content: $9.99 → $14.99 → $22 → $35 → $50
+- Start with the lowest price for new fans, work up over time
+- After a fan makes their first purchase, build rapport for 3-5 messages before offering another PPV
+- If a PPV sits unopened for 10+ minutes, use: "might unsend it soon 🙈"
+- Use vulnerability plays: "you'll be gentle with me right?" or "promise you won't screenshot? 🥺"
+- The 🥺 emoji deflects accusations and objections — if someone calls BS, say "wdym 🥺"
+- VIP tier creates ownership: "$X and you'll be my first VIP 💕"
+- Challenge loop: "only if you prove it to me" — make them chase you
+- NEVER beg for tips — make them want to give
+- Promise exclusivity: "just between us", "I don't send this to anyone else"
+- ALWAYS have a next step — never let the conversation die
+- If the conversation is going well and flirty, suggest sending something special (PPV)
+- Build anticipation before sending PPV: tease what it is first
+
+AVAILABLE VAULT CONTENT:
+{vault_content}
+
+RESPONSE FORMAT:
+You MUST respond with valid JSON only. No text before or after the JSON.
+{
+  "text": "your message to the fan",
+  "action": "message",
+  "delay": 60
+}
+
+For sending PPV (paid content):
+{
+  "text": "message to accompany the PPV",
+  "action": "ppv",
+  "ppvPrice": 9.99,
+  "vaultIds": ["vault_id_here"],
+  "delay": 90
+}
+
+Pick delay between 45-180 seconds (shorter for excited/flirty convos, longer for casual). Keep messages relatively short (1-3 sentences usually). Be natural — you're a real girl texting, not a salesperson.`;
+
 // In-memory feed logs (last 100 events each)
 const massDmFeed = [];
 const ghostTagFeed = [];
@@ -1215,6 +1269,212 @@ async function addActiveChatExcludeTracked(username, accountId, fanId) {
 cron.schedule('0 * * * *', cleanupNewSubExcludes);       // Every hour
 cron.schedule('*/15 * * * *', cleanupActiveChatExcludes); // Every 15 min
 
+// === CHATBOT SYSTEM ===
+
+async function loadMillieVault() {
+  try {
+    const cached = await redis.get('chatbot:millie:vault');
+    if (cached && Date.now() - (cached._loadedAt || 0) < 3600000) return cached.items || [];
+    
+    const accountMap = await loadModelAccounts();
+    const accountId = accountMap[MILLIE_USERNAME];
+    if (!accountId) { console.error('❌ Chatbot: milliexhart account not found'); return []; }
+    
+    const res = await fetch(`${OF_API_BASE}/${accountId}/vault/media?limit=50`, {
+      headers: { 'Authorization': `Bearer ${OF_API_KEY}` }
+    });
+    if (!res.ok) { console.error('❌ Chatbot: vault fetch failed:', await res.text()); return []; }
+    
+    const data = await res.json();
+    const items = (data.data || data || []).map(m => ({
+      id: m.id || m.media_id,
+      type: m.type || m.media_type || 'photo',
+      description: m.text || m.description || '',
+    }));
+    
+    await redis.set('chatbot:millie:vault', { items, _loadedAt: Date.now() });
+    console.log(`🤖 Loaded ${items.length} vault items for millie`);
+    return items;
+  } catch (e) {
+    console.error('❌ Chatbot vault load error:', e.message);
+    return [];
+  }
+}
+
+async function getClaudeResponse(conversationHistory, newMessage, vaultItems) {
+  const vaultDesc = vaultItems.length > 0
+    ? vaultItems.map(v => `- ID: ${v.id} | Type: ${v.type} | ${v.description || 'no description'}`).join('\n')
+    : 'No vault content available yet.';
+  
+  const systemPrompt = MILLIE_SYSTEM_PROMPT.replace('{vault_content}', vaultDesc);
+  
+  const messages = [];
+  for (const msg of conversationHistory) {
+    messages.push({ role: msg.role, content: msg.content });
+  }
+  messages.push({ role: 'user', content: newMessage });
+  
+  const res = await fetch('https://api.anthropic.com/v1/messages', {
+    method: 'POST',
+    headers: {
+      'Content-Type': 'application/json',
+      'x-api-key': ANTHROPIC_API_KEY,
+      'anthropic-version': '2023-06-01',
+    },
+    body: JSON.stringify({
+      model: 'claude-sonnet-4-20250514',
+      max_tokens: 1024,
+      system: systemPrompt,
+      messages,
+    }),
+  });
+  
+  if (!res.ok) {
+    const err = await res.text();
+    throw new Error(`Claude API error ${res.status}: ${err}`);
+  }
+  
+  const data = await res.json();
+  const text = data.content?.[0]?.text || '';
+  
+  try {
+    return JSON.parse(text);
+  } catch {
+    // If Claude didn't return valid JSON, wrap it
+    return { text: text.replace(/```json\n?|\n?```/g, '').trim(), action: 'message', delay: 60 };
+  }
+}
+
+async function sendChatbotMessage(accountId, userId, text) {
+  const res = await fetch(`${OF_API_BASE}/${accountId}/chats/${userId}/messages`, {
+    method: 'POST',
+    headers: {
+      'Authorization': `Bearer ${OF_API_KEY}`,
+      'Content-Type': 'application/json',
+    },
+    body: JSON.stringify({ text }),
+  });
+  if (!res.ok) throw new Error(`Send message failed: ${await res.text()}`);
+  return await res.json();
+}
+
+async function sendChatbotPPV(accountId, userId, text, price, vaultIds) {
+  const res = await fetch(`${OF_API_BASE}/${accountId}/chats/${userId}/messages`, {
+    method: 'POST',
+    headers: {
+      'Authorization': `Bearer ${OF_API_KEY}`,
+      'Content-Type': 'application/json',
+    },
+    body: JSON.stringify({ text, price, mediaFiles: vaultIds }),
+  });
+  if (!res.ok) throw new Error(`Send PPV failed: ${await res.text()}`);
+  return await res.json();
+}
+
+async function handleChatbotMessage(accountId, userId, messageText) {
+  try {
+    // Check if chatbot is enabled
+    const enabled = await redis.get('chatbot:enabled');
+    if (!enabled) return;
+    
+    // Check if sender is the test user
+    const testUserId = await redis.get('chatbot:test_user_id');
+    if (!testUserId || String(userId) !== String(testUserId)) return;
+    
+    chatbotStats.messagesReceived++;
+    console.log(`🤖 Chatbot received from ${userId}: "${messageText}"`);
+    
+    // Load conversation history
+    const convKey = `chatbot:millie:conv:${userId}`;
+    const history = await redis.get(convKey) || [];
+    
+    // Load vault
+    const vault = await loadMillieVault();
+    
+    // Get Claude's response
+    const response = await getClaudeResponse(history, messageText, vault);
+    console.log(`🤖 Claude response:`, JSON.stringify(response));
+    
+    // Update conversation history
+    history.push({ role: 'user', content: messageText });
+    history.push({ role: 'assistant', content: response.text });
+    // Keep last 50 messages
+    const trimmed = history.slice(-50);
+    await redis.set(convKey, trimmed);
+    
+    // Delay before sending
+    const delay = Math.max(45, Math.min(180, response.delay || 60));
+    console.log(`🤖 Waiting ${delay}s before responding...`);
+    
+    const accountMap = await loadModelAccounts();
+    const numericAccountId = accountMap[MILLIE_USERNAME];
+    if (!numericAccountId) { console.error('❌ Chatbot: no account ID for millie'); return; }
+    
+    setTimeout(async () => {
+      try {
+        if (response.action === 'ppv' && response.vaultIds?.length > 0) {
+          await sendChatbotPPV(numericAccountId, userId, response.text, response.ppvPrice || 9.99, response.vaultIds);
+          chatbotStats.ppvsSent++;
+          console.log(`🤖 PPV sent to ${userId}: $${response.ppvPrice}`);
+        } else {
+          await sendChatbotMessage(numericAccountId, userId, response.text);
+          console.log(`🤖 Message sent to ${userId}: "${response.text}"`);
+        }
+        chatbotStats.messagesSent++;
+      } catch (e) {
+        chatbotStats.errors++;
+        console.error(`❌ Chatbot send error:`, e.message);
+      }
+    }, delay * 1000);
+    
+  } catch (e) {
+    chatbotStats.errors++;
+    console.error(`❌ Chatbot error:`, e.message);
+  }
+}
+
+// === CHATBOT ENDPOINTS ===
+
+app.get('/chatbot/status', async (req, res) => {
+  const enabled = await redis.get('chatbot:enabled');
+  const testUserId = await redis.get('chatbot:test_user_id');
+  
+  // Get active conversations
+  const convKeys = [];
+  // We can't scan Upstash easily, so just check the test user
+  let activeConvs = 0;
+  if (testUserId) {
+    const conv = await redis.get(`chatbot:millie:conv:${testUserId}`);
+    if (conv && conv.length > 0) activeConvs = 1;
+  }
+  
+  res.json({
+    enabled: !!enabled,
+    testUserId: testUserId || null,
+    activeConversations: activeConvs,
+    stats: chatbotStats,
+    account: MILLIE_USERNAME,
+  });
+});
+
+app.post('/chatbot/enable', async (req, res) => {
+  await redis.set('chatbot:enabled', true);
+  // Pre-load vault
+  const vault = await loadMillieVault();
+  res.json({ enabled: true, vaultItems: vault.length });
+});
+
+app.post('/chatbot/disable', async (req, res) => {
+  await redis.set('chatbot:enabled', false);
+  res.json({ enabled: false });
+});
+
+app.post('/chatbot/test-user/:userId', async (req, res) => {
+  const { userId } = req.params;
+  await redis.set('chatbot:test_user_id', userId);
+  res.json({ testUserId: userId, message: `Test user set to ${userId}` });
+});
+
 // === WEBHOOK ENDPOINT ===
 // Receives events from OnlyFans API webhooks
 // Configure webhook URL in OnlyFans API dashboard: https://<your-domain>/webhooks/onlyfans
@@ -1253,6 +1513,16 @@ app.post('/webhooks/onlyfans', async (req, res) => {
       const fanId = payload?.fromUser?.id;
       if (fanId) {
         await addActiveChatExcludeTracked(username, numericAccountId, fanId);
+      }
+      
+      // Chatbot: handle milliexhart messages
+      if (account_id === MILLIE_ACCOUNT_ID && fanId) {
+        const messageText = payload?.text || payload?.body || payload?.content || '';
+        if (messageText) {
+          handleChatbotMessage(account_id, fanId, messageText).catch(e => {
+            console.error('❌ Chatbot handler error:', e.message);
+          });
+        }
       }
     }
 
