@@ -18,7 +18,7 @@ const redis = new Redis({
 });
 
 // Chatbot config
-const ANTHROPIC_API_KEY = process.env.ANTHROPIC_API_KEY || 'REDACTED';
+const ANTHROPIC_API_KEY = process.env.ANTHROPIC_API_KEY;
 const MILLIE_ACCOUNT_ID = 'acct_ebca85077e0a4b7da04cf14176466411';
 const MILLIE_USERNAME = 'milliexhart';
 const chatbotStats = { messagesReceived: 0, messagesSent: 0, ppvsSent: 0, errors: 0 };
@@ -152,9 +152,9 @@ bundleCategory: one of the category keys above (e.g. "bundle_1", "vip_bundle_3",
 itemCount: how many items to include (the code will pick from that category)
 
 DELAY GUIDE:
-- Short reactions/greetings: 30-60
-- Regular convo: 45-120
-- PPV (you're "picking content"): 90-180
+- Short reactions/greetings: 10-15
+- Regular convo: 10-20
+- PPV (you're "picking content"): 15-25
 
 Keep it natural. You're a real girl, not a bot.`;
 
@@ -1605,14 +1605,14 @@ async function handleChatbotMessage(accountId, userId, messageText) {
     // Smart delay based on response type
     let delay;
     if (response.action === 'ppv') {
-      delay = 90 + Math.floor(Math.random() * 90); // 90-180s
+      delay = 15 + Math.floor(Math.random() * 10); // 15-25s for PPV (test mode)
     } else if (messageText.length < 20) {
-      delay = 30 + Math.floor(Math.random() * 30); // 30-60s for short msgs
+      delay = 10 + Math.floor(Math.random() * 10); // 10-20s for short msgs
     } else {
-      delay = 45 + Math.floor(Math.random() * 75); // 45-120s regular
+      delay = 10 + Math.floor(Math.random() * 10); // 10-20s regular
     }
-    // Allow Claude to override within bounds
-    if (response.delay) delay = Math.max(30, Math.min(180, response.delay));
+    // Allow Claude to override within bounds (test mode: 10-25s)
+    if (response.delay) delay = Math.max(10, Math.min(25, response.delay));
     console.log(`🤖 Waiting ${delay}s before responding...`);
 
     setTimeout(async () => {
