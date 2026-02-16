@@ -1707,7 +1707,11 @@ function selectVaultItems(catalog, bundleCategory, itemCount, fanId) {
 
 async function getClaudeResponse(conversationHistory, newMessage, fanContext) {
   const fanCtxStr = buildFanContextString(fanContext);
-  const systemPrompt = MILLIE_SYSTEM_PROMPT.replace('{fan_context}', fanCtxStr);
+  // Inject current time in Miami (Millie's timezone)
+  const miamiTime = new Date().toLocaleString('en-US', { timeZone: 'America/New_York', hour: 'numeric', minute: '2-digit', hour12: true, weekday: 'short' });
+  const miamiHour = new Date().toLocaleString('en-US', { timeZone: 'America/New_York', hour: 'numeric', hour12: false });
+  const timeCtx = `CURRENT TIME IN MIAMI: ${miamiTime}. ${Number(miamiHour) < 6 ? 'Its late night/early morning.' : Number(miamiHour) < 12 ? 'Its morning.' : Number(miamiHour) < 17 ? 'Its afternoon.' : Number(miamiHour) < 21 ? 'Its evening.' : 'Its nighttime.'} Keep your messages time-appropriate — dont say "just woke up" at 3pm, dont say "going to bed" at noon. Be aware of what time it actually is.`;
+  const systemPrompt = MILLIE_SYSTEM_PROMPT.replace('{fan_context}', `${timeCtx}\n\n${fanCtxStr}`);
 
   const messages = [];
   for (const msg of conversationHistory) {
