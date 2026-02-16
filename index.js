@@ -2153,6 +2153,76 @@ app.post('/webhooks/onlyfans', async (req, res) => {
         await addActiveChatExcludeTracked(username, numericAccountId, fanId);
       }
     }
+
+    if (event === 'messages.ppv.unlocked') {
+      // Fan BOUGHT a PPV — strike while the wallet's hot
+      const fanId = payload?.fromUser?.id || payload?.user?.id || payload?.userId;
+      const price = payload?.price || payload?.amount || 0;
+      console.log(`💰 PPV PURCHASED: ${username} ← fan ${fanId} ($${price})`);
+      
+      if (account_id === MILLIE_ACCOUNT_ID && fanId) {
+        // Chatbot model — auto follow up with upsell
+        console.log(`🤖 PPV unlock trigger: auto-upselling fan ${fanId} after $${price} purchase`);
+        
+        // Wait 2-5 min before following up (don't seem desperate)
+        const delay = (2 + Math.random() * 3) * 60 * 1000;
+        setTimeout(async () => {
+          try {
+            const vault = await loadVaultCatalog(numericAccountId);
+            const convKey = `chatbot:conv:${fanId}`;
+            const history = await redis.get(convKey) || [];
+            const fanContext = await getFanContext(numericAccountId, fanId);
+            
+            // Inject system note about the purchase so Claude knows
+            const purchaseNote = `[SYSTEM: Fan just PURCHASED your PPV for $${price}. This is a HOT buyer — follow up immediately with post-purchase script. Thank them, keep sexual energy going, then upsell next tier at a HIGHER price. If they bought at $18-20, next should be $25-32. If they bought at $25-35, next should be $40-55. Strike NOW while they're still aroused.]`;
+            
+            const response = await getClaudeResponse(history, purchaseNote, fanContext);
+            
+            // Process response (same as regular message handling)
+            let messages = [];
+            if (response.messages && Array.isArray(response.messages)) {
+              messages = response.messages;
+            } else {
+              messages = [response];
+            }
+            
+            // Update conversation history
+            history.push({ role: 'user', content: purchaseNote });
+            const assistantParts = messages.map(m => {
+              if (m.action === 'ppv' && m.bundleCategory) {
+                return `${m.text || ''} [SYSTEM: PPV SENT — category=${m.bundleCategory}, items=${Math.max(m.itemCount || 8, 8)}, price=$${m.ppvPrice}]`;
+              }
+              return m.text;
+            });
+            history.push({ role: 'assistant', content: assistantParts.join(' ... ') });
+            await redis.set(convKey, history.slice(-50));
+            
+            // Send messages with delays
+            for (let i = 0; i < messages.length; i++) {
+              const msg = messages[i];
+              if (i > 0) {
+                const words = (msg.text || '').split(/\s+/).length;
+                const delayMs = Math.max(3000, (words / 40) * 60000 + 2000);
+                await new Promise(r => setTimeout(r, delayMs));
+              }
+              
+              if (msg.action === 'ppv' && msg.bundleCategory) {
+                const vaultIds = selectVaultItems(vault, msg.bundleCategory, msg.itemCount || 8, fanId);
+                if (vaultIds.length > 0) {
+                  await sendChatbotPPV(numericAccountId, fanId, msg.text, msg.ppvPrice || 25, vaultIds);
+                  console.log(`🤖 Post-purchase upsell PPV sent to ${fanId}: $${msg.ppvPrice} [${msg.bundleCategory}]`);
+                }
+              } else {
+                await sendChatbotMessage(numericAccountId, fanId, msg.text);
+              }
+            }
+            console.log(`🤖 Post-purchase follow-up complete for fan ${fanId}`);
+          } catch (e) {
+            console.error(`❌ Post-purchase follow-up error for fan ${fanId}:`, e.message);
+          }
+        }, delay);
+      }
+    }
   } catch (e) {
     console.error(`Webhook processing error (${event}):`, e.message);
   }
