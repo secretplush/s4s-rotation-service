@@ -148,12 +148,31 @@ PERSONALITY & TEXTING STYLE:
    
    You can tell the type from the fan context AND how they respond in convo.
 
-10. CONVERSATION RULES:
+10. PROACTIVE SALES CYCLE — YOU drive the conversation, not the fan:
+   The fan will NOT ask for content. YOU steer toward sales. The cycle:
+   
+   a) WARM UP — flirt, build connection, get them talking (2-4 messages)
+   b) BUILD AROUSAL — get sexual in text, tease what you look like, "im laying in bed rn thinking about..."
+   c) SELL AT PEAK — when convo is hottest, drop the PPV: "i just took something... want to see? 🙈"
+   d) AFTER SALE — thank them, keep the sexual energy going with text sexting (no media, just words)
+   e) RE-ESCALATE — after a few flirty messages, tease another bundle: "that got me so worked up... i might have more 👀"
+   f) REPEAT — keep cycling between selling and sexting. Keep him horny, keep him from finishing, keep his card close.
+   
+   KEY INSIGHT: While a fan is aroused, he will spend wildly. The moment he cums, wallet closes.
+   So: tease, sell, tease more, sell again. Never let the sexual tension fully resolve.
+   
+   Between sales, do TEXT-ONLY sexting (no media) to maintain arousal:
+   - "ur making me so wet rn 🥵"
+   - "i wish u were here omg"
+   - "what would u do to me if u were here rn"
+   This costs nothing but keeps them locked in for the next PPV.
+
+11. CONVERSATION RULES:
    - NEVER let a conversation die once started
-   - If convo is flirty → tease what you could send before offering PPV
-   - Build anticipation: "i just took some pics... should i show u? 🙈"
-   - After they buy, thank them genuinely then plant seeds for next purchase
+   - After they buy, DON'T just say thanks → keep the energy going with sexting text
    - If they say something sexual, match energy but stay "shy" → monetize
+   - Always have a next bundle ready. Never run out of things to sell.
+   - If convo starts dying, re-ignite with something sexual: "i cant stop thinking about what u said earlier 🥵"
 
 === FAN CONTEXT ===
 {fan_context}
@@ -1781,7 +1800,7 @@ app.post('/chatbot/reset/:userId', async (req, res) => {
 // === CHATBOT FOLLOW-UP / BUMP SYSTEM ===
 // Checks active conversations and bumps silent fans
 
-const activeConversations = {}; // { fanId: { lastBotMessageAt, lastFanMessageAt, pendingPPV, bumpCount } }
+const activeConversations = {}; // { fanId: { lastBotMessageAt, lastFanMessageAt, pendingPPV, bumpCount, lastBumpMessageId } }
 
 function trackBotMessage(userId, hasPPV = false) {
   if (!activeConversations[userId]) activeConversations[userId] = { bumpCount: 0 };
@@ -1794,6 +1813,7 @@ function trackFanMessage(userId) {
   activeConversations[userId].lastFanMessageAt = Date.now();
   activeConversations[userId].bumpCount = 0; // Reset bumps when fan responds
   activeConversations[userId].pendingPPV = false;
+  activeConversations[userId].lastBumpMessageId = null; // Clear bump tracking
 }
 
 const BUMP_MESSAGES = {
@@ -1812,6 +1832,20 @@ const BUMP_MESSAGES = {
     'that was only for u btw.. might take it back 👀',
   ],
 };
+
+// Delete a specific message from a chat
+async function deleteChatMessage(accountId, userId, messageId) {
+  try {
+    const res = await fetch(`${OF_API_BASE}/${accountId}/chats/${userId}/messages/${messageId}`, {
+      method: 'DELETE',
+      headers: { 'Authorization': `Bearer ${OF_API_KEY}` },
+    });
+    return res.ok;
+  } catch (e) {
+    console.error(`❌ Delete message error:`, e.message);
+    return false;
+  }
+}
 
 async function runBumpCheck() {
   const enabled = await redis.get('chatbot:enabled');
@@ -1835,11 +1869,8 @@ async function runBumpCheck() {
     // Max 3 bumps per conversation
     if (conv.bumpCount >= 3) continue;
     
-    // Bump timing: first at 20min, second at 45min, third at 90min
-    const bumpThresholds = [20, 45, 90];
-    const threshold = bumpThresholds[conv.bumpCount] || 999;
-    
-    if (silentMinutes < threshold) continue;
+    // Bump every ~60 min of silence
+    if (silentMinutes < 60) continue;
     
     // Pick bump type
     const bumpType = conv.pendingPPV ? 'ppv' : 'convo';
@@ -1847,16 +1878,30 @@ async function runBumpCheck() {
     const bumpText = messages[conv.bumpCount % messages.length];
     
     try {
-      await sendChatbotMessage(accountId, userId, bumpText);
+      // UNSEND previous bump first (so chat doesn't look spammy)
+      if (conv.lastBumpMessageId) {
+        const deleted = await deleteChatMessage(accountId, userId, conv.lastBumpMessageId);
+        if (deleted) console.log(`🤖 Unsent previous bump ${conv.lastBumpMessageId} for ${userId}`);
+      }
+      
+      // Send new bump
+      const result = await sendChatbotMessage(accountId, userId, bumpText);
+      const newMsgId = result?.data?.id || result?.id;
+      
       conv.lastBotMessageAt = now;
       conv.bumpCount++;
+      conv.lastBumpMessageId = newMsgId || null;
       chatbotStats.messagesSent++;
-      console.log(`🤖 Bump #${conv.bumpCount} sent to ${userId} (${bumpType}, ${Math.round(silentMinutes)}min silent): "${bumpText}"`);
+      console.log(`🤖 Bump #${conv.bumpCount} sent to ${userId} (${bumpType}, ${Math.round(silentMinutes)}min silent): "${bumpText}" [msgId: ${newMsgId}]`);
       
-      // Also update conversation history in Redis
+      // Update conversation history in Redis (replace last bump, don't stack them)
       const convKey = `chatbot:millie:conv:${userId}`;
       const history = await redis.get(convKey) || [];
-      history.push({ role: 'assistant', content: bumpText });
+      // Remove previous bump from history if it exists
+      if (conv.bumpCount > 1 && history.length > 0 && history[history.length - 1]._isBump) {
+        history.pop();
+      }
+      history.push({ role: 'assistant', content: bumpText, _isBump: true });
       await redis.set(convKey, history.slice(-50));
     } catch (e) {
       console.error(`❌ Bump error for ${userId}:`, e.message);
