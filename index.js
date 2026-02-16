@@ -1870,6 +1870,7 @@ async function handleChatbotMessage(accountId, userId, messageText) {
           try {
             const result = await sendChatbotPPV(numericAccountId, userId, msg.text, msg.ppvPrice || 9.99, vaultIds);
             chatbotStats.ppvsSent++;
+            ppvSentThisTurn = true;
             trackBotMessage(userId, true);
             console.log(`🤖 PPV sent to ${userId}: $${msg.ppvPrice} [${msg.bundleCategory}] ${vaultIds.length} items`, JSON.stringify(result)?.substring(0, 200));
             chatbotStats.debugLog.push({ at: Date.now(), type: 'ppv_success', result: JSON.stringify(result)?.substring(0, 300) });
@@ -1900,8 +1901,14 @@ async function handleChatbotMessage(accountId, userId, messageText) {
     // Send messages sequentially with realistic delays — don't cancel on overlap
     // Real texting has crossover and that's fine. Claude handles context.
     const sendQueue = async () => {
+      let ppvSentThisTurn = false;
       for (let i = 0; i < messages.length; i++) {
         const msg = messages[i];
+        // Max 1 PPV per response — skip additional PPVs
+        if (msg.action === 'ppv' && ppvSentThisTurn) {
+          console.log(`🤖 Skipping duplicate PPV in same response (msg ${i+1})`);
+          continue;
+        }
         const delay = calcTypingDelay(msg.text, msg.action === 'ppv');
         
         console.log(`🤖 Queue ${i+1}/${messages.length}: "${msg.text?.substring(0,50)}..." delay=${delay}s`);
