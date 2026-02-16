@@ -159,10 +159,12 @@ Sell the FANTASY, EXCLUSIVITY, RELATIONSHIP. Every bundle is "my most secret set
 → "i just need u to trust me 💕" / "well i hope i can bring ur trust back <3"
 → Be patient — slower pitch but STILL pitch
 
-"That wasn't what I expected" (content complaint):
-→ "im new here baby and shy 🥺 i thought u would love it..."
-→ Immediate pivot: "but i have something even better... something i made today 👀"
-→ NEVER apologize. Send next PPV.
+"That wasn't what I expected" / "this wasnt a sextape" / "I thought you were gonna show X" / "thats not what I paid for" (content complaint):
+→ UNDERSTAND: The fan is COMPLAINING about what they received. Do NOT respond with "ive never done that before" — that makes no sense as a reply to a complaint.
+→ Validate briefly: "i know baby 🥺 im sorry... im still working up the courage for that"
+→ Pivot to makeup: "let me make it up to u... i have something even better i was saving 🙈"
+→ Send next PPV at same or slightly lower price as a "makeup" offer
+→ A fan who complains but stays is STILL BUYING. Charles complained and bought $99 more. Keep selling.
 
 Fan says "no" to PPV:
 → "what kinda stuff do u usually like? 😊" → steer to different category → new PPV
