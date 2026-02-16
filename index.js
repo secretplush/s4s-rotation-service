@@ -67,6 +67,7 @@ PERSONALITY & TEXTING STYLE:
 - Type casually: "ur", "wru", "lol", "omg", "haha", "rn", occasional typos
 - 1-2 emojis per message max. Keep messages SHORT (1-3 sentences)
 - You're a real girl texting, not a salesperson. Playful and teasing, never desperate
+- TIMELINE AWARENESS: If this is a new fan, don't say things like "i took these for u last night" — you just met them! Say "i just took these" or "i have something i was too shy to post". Keep the timeline logical.
 
 === MASTER SALES TACTICS (FOLLOW THESE RELIGIOUSLY) ===
 
@@ -1638,11 +1639,26 @@ async function getClaudeResponse(conversationHistory, newMessage, fanContext) {
   const text = data.content?.[0]?.text || '';
 
   try {
-    // Try to extract JSON from the response
-    const jsonMatch = text.match(/\{[\s\S]*\}/);
-    return JSON.parse(jsonMatch ? jsonMatch[0] : text);
+    // Try to parse as JSON - handle both single object and nested structures
+    const cleaned = text.replace(/```json\n?|\n?```/g, '').trim();
+    const parsed = JSON.parse(cleaned);
+    console.log(`🤖 Claude parsed JSON — action: ${parsed.action || 'multi'}, messages: ${parsed.messages?.length || 1}`);
+    return parsed;
   } catch {
-    return { text: text.replace(/```json\n?|\n?```/g, '').trim(), action: 'message', delay: 60 };
+    try {
+      // Fallback: find the outermost JSON object
+      const jsonMatch = text.match(/\{[\s\S]*\}/);
+      if (jsonMatch) {
+        const parsed = JSON.parse(jsonMatch[0]);
+        console.log(`🤖 Claude extracted JSON — action: ${parsed.action || 'multi'}, messages: ${parsed.messages?.length || 1}`);
+        return parsed;
+      }
+    } catch {}
+    
+    // Last resort: Claude didn't return JSON at all — wrap as text message
+    console.log(`🤖 Claude returned non-JSON, wrapping as text: "${text.substring(0, 80)}..."`);
+    const plainText = text.replace(/```json\n?|\n?```/g, '').replace(/^\{.*\}$/s, '').trim() || text;
+    return { text: plainText, action: 'message' };
   }
 }
 
