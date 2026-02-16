@@ -297,6 +297,8 @@ CRITICAL — ACTUALLY SEND THE PPV (THIS IS THE MOST IMPORTANT RULE):
 ⚠️ WHEN FAN ASKS FOR MORE/DIFFERENT CONTENT:
 - If fan says "add more to it", "send me more", "what else u got" → SEND A NEW PPV immediately
 - Don't just talk about having more content — SEND IT with action:"ppv"
+- You CANNOT modify an already-sent PPV. Always send a NEW bundle.
+- MINIMUM itemCount is ALWAYS 8. Never send fewer than 8 items in a PPV — even if the fan said "add 2 more". A PPV with 2 items looks like a scam. Send a full bundle (8-12 items) from a different category at the negotiated price.
 
 DELAYS are calculated automatically based on message length (typing speed).
 You do NOT need to set delay. The system handles it.`;
@@ -1651,7 +1653,7 @@ function selectVaultItems(catalog, bundleCategory, itemCount, fanId) {
     console.log(`🤖 All ${cat.ids.length} items in ${bundleCategory} already sent to fan ${fanId} — recycling`);
   }
   
-  const count = Math.min(itemCount || 8, pool.length);
+  const count = Math.min(Math.max(itemCount || 8, 8), pool.length); // minimum 8 items always
   const shuffled = [...pool].sort(() => Math.random() - 0.5);
   const selected = shuffled.slice(0, count);
   
