@@ -196,21 +196,31 @@ PREMIUM ($50-$99) — Most explicit:
 === RESPONSE FORMAT ===
 Respond with ONLY valid JSON. No text before or after.
 
-For regular messages:
-{"text":"your message","action":"message","delay":45}
+You can send MULTIPLE messages (double/triple text like a real person). Use an array:
 
-For sending PPV content:
-{"text":"message with the PPV","action":"ppv","ppvPrice":9.99,"bundleCategory":"bundle_3","itemCount":5,"delay":90}
+Single message:
+{"messages":[{"text":"hey u 🥺","action":"message"}]}
+
+Double text:
+{"messages":[{"text":"omgg","action":"message"},{"text":"i was literally just thinking about u","action":"message"}]}
+
+PPV with lead-up text:
+{"messages":[{"text":"ok dont judge me 🙈","action":"message"},{"text":"i took these for u last night...","action":"ppv","ppvPrice":14.99,"bundleCategory":"bundle_3","itemCount":8}]}
+
+LEGACY FORMAT (still works): {"text":"message","action":"message"} — but prefer the array format.
 
 bundleCategory: one of the category keys above (e.g. "bundle_1", "vip_bundle_3", "sexting_1", "cwm")
 itemCount: how many items to include (the code will pick from that category)
 
-DELAY GUIDE:
-- Short reactions/greetings: 10-15
-- Regular convo: 10-20
-- PPV (you're "picking content"): 15-25
+DOUBLE TEXTING RULES:
+- Double text often! Real girls send 2-3 messages in a row all the time.
+- Split long thoughts into separate messages: "omg" + "i cant believe u said that 🥺"
+- Use it for emphasis: "wait" + "are u serious rn" 
+- Before PPV, a lead-up text builds anticipation: "ok i have something..." + [PPV]
+- Don't always double text tho — mix it up. Sometimes one message is enough.
 
-Keep it natural. You're a real girl, not a bot.`;
+DELAYS are calculated automatically based on message length (typing speed).
+You do NOT need to set delay. The system handles it.`;
 
 // In-memory feed logs (last 100 events each)
 const massDmFeed = [];
@@ -1685,57 +1695,70 @@ async function handleChatbotMessage(accountId, userId, messageText) {
     const response = await getClaudeResponse(history, messageText, fanContext);
     console.log(`🤖 Claude response:`, JSON.stringify(response));
 
-    // Update conversation history (keep last 50 messages)
+    // Normalize to multi-message format
+    let messages;
+    if (response.messages && Array.isArray(response.messages)) {
+      messages = response.messages;
+    } else {
+      // Legacy single-message format
+      messages = [response];
+    }
+
+    // Update conversation history
     history.push({ role: 'user', content: messageText });
-    history.push({ role: 'assistant', content: response.text });
+    const allTexts = messages.map(m => m.text).join(' | ');
+    history.push({ role: 'assistant', content: allTexts });
     await redis.set(convKey, history.slice(-50));
 
-    // Smart delay based on response type
-    let delay;
-    if (response.action === 'ppv') {
-      delay = 15 + Math.floor(Math.random() * 10); // 15-25s for PPV (test mode)
-    } else if (messageText.length < 20) {
-      delay = 10 + Math.floor(Math.random() * 10); // 10-20s for short msgs
-    } else {
-      delay = 10 + Math.floor(Math.random() * 10); // 10-20s regular
+    // WPM-based delay calculator (~35 WPM on phone, plus natural variance)
+    function calcTypingDelay(text, isPPV = false) {
+      const words = (text || '').split(/\s+/).length;
+      const wpm = 35 + Math.floor(Math.random() * 10); // 35-45 WPM
+      const typingSeconds = Math.max(3, (words / wpm) * 60); // min 3s
+      const thinkingPause = 2 + Math.random() * 3; // 2-5s "reading + thinking"
+      const ppvBuildTime = isPPV ? 10 : 0; // 10s to "pick content"
+      return Math.round(typingSeconds + thinkingPause + ppvBuildTime);
     }
-    // Allow Claude to override within bounds (test mode: 10-25s)
-    if (response.delay) delay = Math.max(10, Math.min(25, response.delay));
-    console.log(`🤖 Waiting ${delay}s before responding...`);
 
-    setTimeout(async () => {
-      try {
-        if (response.action === 'ppv' && response.bundleCategory) {
-          // Smart vault selection from category
-          const vaultIds = selectVaultItems(vault, response.bundleCategory, response.itemCount || 5, userId);
-          if (vaultIds.length > 0) {
-            await sendChatbotPPV(numericAccountId, userId, response.text, response.ppvPrice || 9.99, vaultIds);
+    // Send messages sequentially with realistic delays
+    let totalDelay = calcTypingDelay(messages[0].text, messages[0].action === 'ppv');
+    
+    for (let i = 0; i < messages.length; i++) {
+      const msg = messages[i];
+      const delay = i === 0 ? totalDelay : calcTypingDelay(msg.text, msg.action === 'ppv');
+      
+      console.log(`🤖 Message ${i+1}/${messages.length}: "${msg.text?.substring(0,50)}..." delay=${delay}s action=${msg.action}`);
+      
+      setTimeout(async () => {
+        try {
+          if (msg.action === 'ppv' && msg.bundleCategory) {
+            const vaultIds = selectVaultItems(vault, msg.bundleCategory, msg.itemCount || 8, userId);
+            if (vaultIds.length > 0) {
+              await sendChatbotPPV(numericAccountId, userId, msg.text, msg.ppvPrice || 9.99, vaultIds);
+              chatbotStats.ppvsSent++;
+              trackBotMessage(userId, true);
+              console.log(`🤖 PPV sent to ${userId}: $${msg.ppvPrice} [${msg.bundleCategory}] ${vaultIds.length} items`);
+            } else {
+              await sendChatbotMessage(numericAccountId, userId, msg.text);
+              trackBotMessage(userId, false);
+            }
+          } else if (msg.action === 'ppv' && msg.vaultIds?.length > 0) {
+            await sendChatbotPPV(numericAccountId, userId, msg.text, msg.ppvPrice || 9.99, msg.vaultIds);
             chatbotStats.ppvsSent++;
             trackBotMessage(userId, true);
-            console.log(`🤖 PPV sent to ${userId}: $${response.ppvPrice} [${response.bundleCategory}] ${vaultIds.length} items`);
           } else {
-            // Fallback: send as regular message if no vault items found
-            await sendChatbotMessage(numericAccountId, userId, response.text);
+            await sendChatbotMessage(numericAccountId, userId, msg.text);
             trackBotMessage(userId, false);
-            console.log(`🤖 PPV fallback → message to ${userId} (no vault items for ${response.bundleCategory})`);
           }
-        } else if (response.action === 'ppv' && response.vaultIds?.length > 0) {
-          // Legacy: direct vault IDs (backward compat)
-          await sendChatbotPPV(numericAccountId, userId, response.text, response.ppvPrice || 9.99, response.vaultIds);
-          chatbotStats.ppvsSent++;
-          trackBotMessage(userId, true);
-          console.log(`🤖 PPV sent to ${userId}: $${response.ppvPrice}`);
-        } else {
-          await sendChatbotMessage(numericAccountId, userId, response.text);
-          trackBotMessage(userId, false);
-          console.log(`🤖 Message sent to ${userId}: "${response.text}"`);
+          chatbotStats.messagesSent++;
+        } catch (e) {
+          chatbotStats.errors++;
+          console.error(`❌ Chatbot send error (msg ${i+1}):`, e.message);
         }
-        chatbotStats.messagesSent++;
-      } catch (e) {
-        chatbotStats.errors++;
-        console.error(`❌ Chatbot send error:`, e.message);
-      }
-    }, delay * 1000);
+      }, (i === 0 ? totalDelay : totalDelay + delay) * 1000);
+      
+      if (i > 0) totalDelay += delay;
+    }
 
   } catch (e) {
     chatbotStats.errors++;
