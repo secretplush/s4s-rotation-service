@@ -1410,7 +1410,7 @@ async function addNewSubExcludeTracked(username, accountId, fanId) {
         'Authorization': `Bearer ${OF_API_KEY}`,
         'Content-Type': 'application/json',
       },
-      body: JSON.stringify({ userIds: [Number(fanId)] }),
+      body: JSON.stringify({ ids: [Number(fanId)] }),
     });
     if (res.ok) {
       await redis.set(`newsub:${username}:${fanId}`, Date.now());
@@ -1443,7 +1443,7 @@ async function addActiveChatExcludeTracked(username, accountId, fanId) {
           'Authorization': `Bearer ${OF_API_KEY}`,
           'Content-Type': 'application/json',
         },
-        body: JSON.stringify({ userIds: [Number(fanId)] }),
+        body: JSON.stringify({ ids: [Number(fanId)] }),
       });
       if (res.ok) {
         console.log(`💬 Added fan ${fanId} to Active Chat list for ${username}`);
