@@ -117,6 +117,13 @@ PERSONALITY & TEXTING STYLE:
    - If fan complains content is too tame → "im sorry 🥺 im new and shy... but i could try something more for u?"
    - This turns complaints into sales opportunities
 
+   CRITICAL — When fan asks "what's in it?" about an UNSOLD/LOCKED PPV:
+   - They are considering buying. DO NOT pivot to selling something else!
+   - Tease the EXISTING PPV harder: "just open it and see 😏", "ur gonna have to find out 🙈"
+   - Build urgency: "might unsend it tho if u dont want it 🥺"
+   - NEVER describe the contents. Keep the mystery alive to close THIS sale.
+   - Only offer a DIFFERENT bundle after they've bought or firmly rejected the current one.
+
 8. PRICE LADDER STRATEGY:
    - Start with regular bundle ($9.99-$14.99) for first purchase
    - After 1st purchase, build rapport for 3-5 messages before next offer
@@ -1418,10 +1425,10 @@ async function loadMillieVault() {
           .replace(/\s*\(.*?\)/g, '')
           .replace(/\s+/g, '_')
           .replace(/[^a-z0-9_]/g, '');
-        if (!categories[key]) categories[key] = { name, ids: [], photos: 0, videos: 0 };
+        if (!categories[key]) categories[key] = { name, ids: [], photoIds: [], videoIds: [], photos: 0, videos: 0 };
         categories[key].ids.push(mediaId);
-        if (mediaType === 'video') categories[key].videos++;
-        else categories[key].photos++;
+        if (mediaType === 'video') { categories[key].videos++; categories[key].videoIds.push(mediaId); }
+        else { categories[key].photos++; categories[key].photoIds.push(mediaId); }
       }
     }
 
@@ -1503,31 +1510,42 @@ const sentItemsPerFan = {}; // { fanId: Set of vault IDs }
 function selectVaultItems(catalog, bundleCategory, itemCount, fanId) {
   const cat = catalog[bundleCategory];
   if (!cat || !cat.ids || cat.ids.length === 0) {
-    // Fallback: pick from a random starter bundle
     const fallback = catalog['bundle_1'] || catalog[Object.keys(catalog)[0]];
     if (!fallback) return [];
     return fallback.ids.slice(0, Math.min(itemCount || 5, fallback.ids.length));
   }
   
-  // Filter out previously sent items for this fan
   const sentItems = sentItemsPerFan[fanId] || new Set();
-  const unsent = cat.ids.filter(id => !sentItems.has(id));
   
-  // If all items in this category were sent, allow resending (with log)
-  const pool = unsent.length > 0 ? unsent : cat.ids;
-  if (unsent.length === 0 && fanId) {
-    console.log(`🤖 All ${cat.ids.length} items in ${bundleCategory} already sent to fan ${fanId} — recycling`);
+  // Separate photos and videos, filter out sent items
+  const photoPool = (cat.photoIds || []).filter(id => !sentItems.has(id));
+  const videoPool = (cat.videoIds || []).filter(id => !sentItems.has(id));
+  
+  // If both pools empty, recycle
+  if (photoPool.length === 0 && videoPool.length === 0) {
+    if (fanId) console.log(`🤖 All items in ${bundleCategory} already sent to fan ${fanId} — recycling`);
+    photoPool.push(...(cat.photoIds || []));
+    videoPool.push(...(cat.videoIds || []));
   }
   
-  const count = Math.min(itemCount || pool.length, pool.length);
-  const shuffled = [...pool].sort(() => Math.random() - 0.5);
-  const selected = shuffled.slice(0, count);
+  // Build balanced bundle: pick up to 2 videos first, rest photos
+  const shuffledVideos = [...videoPool].sort(() => Math.random() - 0.5);
+  const shuffledPhotos = [...photoPool].sort(() => Math.random() - 0.5);
+  
+  const targetVideos = Math.min(2, shuffledVideos.length);
+  const targetTotal = Math.min(itemCount || 8, photoPool.length + videoPool.length);
+  const targetPhotos = Math.min(targetTotal - targetVideos, shuffledPhotos.length);
+  
+  const selected = [
+    ...shuffledVideos.slice(0, targetVideos),
+    ...shuffledPhotos.slice(0, targetPhotos)
+  ];
   
   // Track what we just selected
   if (fanId) {
     if (!sentItemsPerFan[fanId]) sentItemsPerFan[fanId] = new Set();
     selected.forEach(id => sentItemsPerFan[fanId].add(id));
-    console.log(`🤖 Fan ${fanId}: ${sentItemsPerFan[fanId].size} unique items sent total`);
+    console.log(`🤖 Fan ${fanId}: sent ${targetPhotos}p + ${targetVideos}v (${sentItemsPerFan[fanId].size} unique total)`);
   }
   
   return selected;
