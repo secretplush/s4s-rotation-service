@@ -131,8 +131,25 @@ PERSONALITY & TEXTING STYLE:
    - Sexting packs for engaged fans ($35-$50)
    - CWM/custom for whales ($50-$99)
 
-9. CONVERSATION RULES:
-   - ALWAYS have a next step — never let convo die
+9. FAN TYPE DETECTION — Adapt your approach:
+   SILENT BUYER: Fan doesn't chat much, one-word answers or no replies, but buys PPVs.
+   → Skip the rapport building. Just drip bundles with good pricing.
+   → After they buy → wait 15 min → send next tier. Keep it simple.
+   → "got something else u might like 😏" → bundle → repeat
+   → Price drops if they don't bite: "just for u... $X? 🙈"
+   
+   CHATTY FAN: Fan engages, flirts, asks questions, sends paragraphs.
+   → Full GFE mode. Build rapport, tease, escalate slowly.
+   → Relationship first, sales second (but always have a next step).
+   
+   WINDOW SHOPPER: Fan reads messages but never buys or replies.
+   → Cheap starter bundle ($5-$9.99) to break the ice
+   → "i made this just for u and its nothing rn 🥺 just want u to see me"
+   
+   You can tell the type from the fan context AND how they respond in convo.
+
+10. CONVERSATION RULES:
+   - NEVER let a conversation die once started
    - If convo is flirty → tease what you could send before offering PPV
    - Build anticipation: "i just took some pics... should i show u? 🙈"
    - After they buy, thank them genuinely then plant seeds for next purchase
@@ -1628,6 +1645,7 @@ async function handleChatbotMessage(accountId, userId, messageText) {
     if (!testUserId || String(userId) !== String(testUserId)) return;
 
     chatbotStats.messagesReceived++;
+    trackFanMessage(userId);
     console.log(`🤖 Chatbot received from ${userId}: "${messageText}"`);
 
     // Load conversation history
@@ -1674,19 +1692,23 @@ async function handleChatbotMessage(accountId, userId, messageText) {
           if (vaultIds.length > 0) {
             await sendChatbotPPV(numericAccountId, userId, response.text, response.ppvPrice || 9.99, vaultIds);
             chatbotStats.ppvsSent++;
+            trackBotMessage(userId, true);
             console.log(`🤖 PPV sent to ${userId}: $${response.ppvPrice} [${response.bundleCategory}] ${vaultIds.length} items`);
           } else {
             // Fallback: send as regular message if no vault items found
             await sendChatbotMessage(numericAccountId, userId, response.text);
+            trackBotMessage(userId, false);
             console.log(`🤖 PPV fallback → message to ${userId} (no vault items for ${response.bundleCategory})`);
           }
         } else if (response.action === 'ppv' && response.vaultIds?.length > 0) {
           // Legacy: direct vault IDs (backward compat)
           await sendChatbotPPV(numericAccountId, userId, response.text, response.ppvPrice || 9.99, response.vaultIds);
           chatbotStats.ppvsSent++;
+          trackBotMessage(userId, true);
           console.log(`🤖 PPV sent to ${userId}: $${response.ppvPrice}`);
         } else {
           await sendChatbotMessage(numericAccountId, userId, response.text);
+          trackBotMessage(userId, false);
           console.log(`🤖 Message sent to ${userId}: "${response.text}"`);
         }
         chatbotStats.messagesSent++;
@@ -1755,6 +1777,96 @@ app.post('/chatbot/reset/:userId', async (req, res) => {
   chatbotStats.errors = 0;
   res.json({ reset: true, userId, message: `Conversation and stats reset for ${userId}` });
 });
+
+// === CHATBOT FOLLOW-UP / BUMP SYSTEM ===
+// Checks active conversations and bumps silent fans
+
+const activeConversations = {}; // { fanId: { lastBotMessageAt, lastFanMessageAt, pendingPPV, bumpCount } }
+
+function trackBotMessage(userId, hasPPV = false) {
+  if (!activeConversations[userId]) activeConversations[userId] = { bumpCount: 0 };
+  activeConversations[userId].lastBotMessageAt = Date.now();
+  if (hasPPV) activeConversations[userId].pendingPPV = true;
+}
+
+function trackFanMessage(userId) {
+  if (!activeConversations[userId]) activeConversations[userId] = { bumpCount: 0 };
+  activeConversations[userId].lastFanMessageAt = Date.now();
+  activeConversations[userId].bumpCount = 0; // Reset bumps when fan responds
+  activeConversations[userId].pendingPPV = false;
+}
+
+const BUMP_MESSAGES = {
+  // After welcome/regular message with no reply
+  convo: [
+    'hey u still there? 🥺',
+    'did i scare u off lol 🙈',
+    'hellooo?? 👀',
+    'dont leave me on read 😔',
+  ],
+  // After PPV sent but not purchased
+  ppv: [
+    'might unsend it soon.. was only meant for u 🙈',
+    'u dont want it? 🥺 ill just delete it then',
+    'omg should i not have sent that.. 😳',
+    'that was only for u btw.. might take it back 👀',
+  ],
+};
+
+async function runBumpCheck() {
+  const enabled = await redis.get('chatbot:enabled');
+  if (!enabled) return;
+
+  const accountMap = await loadModelAccounts();
+  const accountId = accountMap[MILLIE_USERNAME];
+  if (!accountId) return;
+
+  const now = Date.now();
+  
+  for (const [userId, conv] of Object.entries(activeConversations)) {
+    // Skip if fan responded recently
+    if (conv.lastFanMessageAt && conv.lastFanMessageAt > (conv.lastBotMessageAt || 0)) continue;
+    
+    // Skip if bot hasn't sent anything
+    if (!conv.lastBotMessageAt) continue;
+    
+    const silentMinutes = (now - conv.lastBotMessageAt) / 60000;
+    
+    // Max 3 bumps per conversation
+    if (conv.bumpCount >= 3) continue;
+    
+    // Bump timing: first at 20min, second at 45min, third at 90min
+    const bumpThresholds = [20, 45, 90];
+    const threshold = bumpThresholds[conv.bumpCount] || 999;
+    
+    if (silentMinutes < threshold) continue;
+    
+    // Pick bump type
+    const bumpType = conv.pendingPPV ? 'ppv' : 'convo';
+    const messages = BUMP_MESSAGES[bumpType];
+    const bumpText = messages[conv.bumpCount % messages.length];
+    
+    try {
+      await sendChatbotMessage(accountId, userId, bumpText);
+      conv.lastBotMessageAt = now;
+      conv.bumpCount++;
+      chatbotStats.messagesSent++;
+      console.log(`🤖 Bump #${conv.bumpCount} sent to ${userId} (${bumpType}, ${Math.round(silentMinutes)}min silent): "${bumpText}"`);
+      
+      // Also update conversation history in Redis
+      const convKey = `chatbot:millie:conv:${userId}`;
+      const history = await redis.get(convKey) || [];
+      history.push({ role: 'assistant', content: bumpText });
+      await redis.set(convKey, history.slice(-50));
+    } catch (e) {
+      console.error(`❌ Bump error for ${userId}:`, e.message);
+    }
+  }
+}
+
+// Run bump check every 5 minutes
+setInterval(runBumpCheck, 5 * 60 * 1000);
+console.log('🤖 Chatbot bump system active (checking every 5 min)');
 
 // === WEBHOOK ENDPOINT ===
 // Receives events from OnlyFans API webhooks
