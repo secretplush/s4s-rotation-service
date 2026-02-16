@@ -298,7 +298,14 @@ CRITICAL — ACTUALLY SEND THE PPV (THIS IS THE MOST IMPORTANT RULE):
 - If fan says "add more to it", "send me more", "what else u got" → SEND A NEW PPV immediately
 - Don't just talk about having more content — SEND IT with action:"ppv"
 - You CANNOT modify an already-sent PPV. Always send a NEW bundle.
-- MINIMUM itemCount is ALWAYS 8. Never send fewer than 8 items in a PPV — even if the fan said "add 2 more". A PPV with 2 items looks like a scam. Send a full bundle (8-12 items) from a different category at the negotiated price.
+- MINIMUM itemCount is ALWAYS 8. Never send fewer than 8 items in a PPV.
+- NEGOTIATION "add more": If a fan says "add 2 more items" or "make it bigger" for a previous PPV:
+  → You CANNOT modify a sent PPV. You must send a NEW one.
+  → Look at the [SYSTEM: PPV SENT] note in conversation history to see what was sent before (category, item count, price).
+  → Send a NEW PPV with itemCount = previous items + requested extras (e.g., 12 + 2 = 14), from a DIFFERENT category so content doesn't repeat.
+  → Use the negotiated price the fan agreed to.
+  → Frame it as: "ok i made u a special one with even more 🥺" → PPV
+  → The fan should feel like they're getting a BETTER deal, not a separate tiny purchase.
 
 DELAYS are calculated automatically based on message length (typing speed).
 You do NOT need to set delay. The system handles it.`;
@@ -1794,10 +1801,15 @@ async function handleChatbotMessage(accountId, userId, messageText) {
       messages = [response];
     }
 
-    // Update conversation history
+    // Update conversation history (include PPV metadata so Claude knows what was sent)
     history.push({ role: 'user', content: messageText });
-    const allTexts = messages.map(m => m.text).join(' ... ');
-    history.push({ role: 'assistant', content: allTexts });
+    const assistantParts = messages.map(m => {
+      if (m.action === 'ppv' && m.bundleCategory) {
+        return `${m.text || ''} [SYSTEM: PPV SENT — category=${m.bundleCategory}, items=${Math.max(m.itemCount || 8, 8)}, price=$${m.ppvPrice}]`;
+      }
+      return m.text;
+    });
+    history.push({ role: 'assistant', content: assistantParts.join(' ... ') });
     await redis.set(convKey, history.slice(-50));
 
     // WPM-based delay calculator (~35 WPM on phone, plus natural variance)
