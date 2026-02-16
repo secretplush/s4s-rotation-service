@@ -1720,45 +1720,65 @@ async function handleChatbotMessage(accountId, userId, messageText) {
       return Math.round(typingSeconds + thinkingPause + ppvBuildTime);
     }
 
-    // Send messages sequentially with realistic delays
-    let totalDelay = calcTypingDelay(messages[0].text, messages[0].action === 'ppv');
-    
-    for (let i = 0; i < messages.length; i++) {
-      const msg = messages[i];
-      const delay = i === 0 ? totalDelay : calcTypingDelay(msg.text, msg.action === 'ppv');
-      
-      console.log(`🤖 Message ${i+1}/${messages.length}: "${msg.text?.substring(0,50)}..." delay=${delay}s action=${msg.action}`);
-      
-      setTimeout(async () => {
+    // Helper to send a single message (text or PPV)
+    async function sendSingleMessage(msg) {
+      if (msg.action === 'ppv' && msg.bundleCategory) {
+        const vaultIds = selectVaultItems(vault, msg.bundleCategory, msg.itemCount || 8, userId);
+        if (vaultIds.length > 0) {
+          await sendChatbotPPV(numericAccountId, userId, msg.text, msg.ppvPrice || 9.99, vaultIds);
+          chatbotStats.ppvsSent++;
+          trackBotMessage(userId, true);
+          console.log(`🤖 PPV sent to ${userId}: $${msg.ppvPrice} [${msg.bundleCategory}] ${vaultIds.length} items`);
+        } else {
+          await sendChatbotMessage(numericAccountId, userId, msg.text);
+          trackBotMessage(userId, false);
+        }
+      } else if (msg.action === 'ppv' && msg.vaultIds?.length > 0) {
+        await sendChatbotPPV(numericAccountId, userId, msg.text, msg.ppvPrice || 9.99, msg.vaultIds);
+        chatbotStats.ppvsSent++;
+        trackBotMessage(userId, true);
+      } else {
+        await sendChatbotMessage(numericAccountId, userId, msg.text);
+        trackBotMessage(userId, false);
+      }
+      chatbotStats.messagesSent++;
+    }
+
+    // Track pending message queues per fan so we can cancel on new incoming
+    // Store a generation counter — if it changes, a new fan message came in
+    if (!activeConversations[userId]) activeConversations[userId] = { bumpCount: 0 };
+    if (!activeConversations[userId].msgGeneration) activeConversations[userId].msgGeneration = 0;
+    activeConversations[userId].msgGeneration++;
+    const myGeneration = activeConversations[userId].msgGeneration;
+
+    // Send messages sequentially with cancellation check
+    const sendQueue = async () => {
+      for (let i = 0; i < messages.length; i++) {
+        const msg = messages[i];
+        const delay = calcTypingDelay(msg.text, msg.action === 'ppv');
+        
+        console.log(`🤖 Queue ${i+1}/${messages.length}: "${msg.text?.substring(0,50)}..." delay=${delay}s`);
+        
+        // Wait the typing delay
+        await new Promise(resolve => setTimeout(resolve, delay * 1000));
+        
+        // Check if fan sent a new message while we were "typing"
+        if (activeConversations[userId]?.msgGeneration !== myGeneration) {
+          console.log(`🤖 Cancelling queued messages for ${userId} — new fan message received (gen ${myGeneration} vs ${activeConversations[userId]?.msgGeneration})`);
+          // Update history to only include what we actually sent
+          return;
+        }
+        
         try {
-          if (msg.action === 'ppv' && msg.bundleCategory) {
-            const vaultIds = selectVaultItems(vault, msg.bundleCategory, msg.itemCount || 8, userId);
-            if (vaultIds.length > 0) {
-              await sendChatbotPPV(numericAccountId, userId, msg.text, msg.ppvPrice || 9.99, vaultIds);
-              chatbotStats.ppvsSent++;
-              trackBotMessage(userId, true);
-              console.log(`🤖 PPV sent to ${userId}: $${msg.ppvPrice} [${msg.bundleCategory}] ${vaultIds.length} items`);
-            } else {
-              await sendChatbotMessage(numericAccountId, userId, msg.text);
-              trackBotMessage(userId, false);
-            }
-          } else if (msg.action === 'ppv' && msg.vaultIds?.length > 0) {
-            await sendChatbotPPV(numericAccountId, userId, msg.text, msg.ppvPrice || 9.99, msg.vaultIds);
-            chatbotStats.ppvsSent++;
-            trackBotMessage(userId, true);
-          } else {
-            await sendChatbotMessage(numericAccountId, userId, msg.text);
-            trackBotMessage(userId, false);
-          }
-          chatbotStats.messagesSent++;
+          await sendSingleMessage(msg);
         } catch (e) {
           chatbotStats.errors++;
           console.error(`❌ Chatbot send error (msg ${i+1}):`, e.message);
         }
-      }, (i === 0 ? totalDelay : totalDelay + delay) * 1000);
-      
-      if (i > 0) totalDelay += delay;
-    }
+      }
+    };
+
+    sendQueue().catch(e => console.error('❌ Send queue error:', e.message));
 
   } catch (e) {
     chatbotStats.errors++;
@@ -1837,6 +1857,8 @@ function trackFanMessage(userId) {
   activeConversations[userId].bumpCount = 0; // Reset bumps when fan responds
   activeConversations[userId].pendingPPV = false;
   activeConversations[userId].lastBumpMessageId = null; // Clear bump tracking
+  // Increment generation to cancel any pending queued messages
+  activeConversations[userId].msgGeneration = (activeConversations[userId].msgGeneration || 0) + 1;
 }
 
 const BUMP_MESSAGES = {
