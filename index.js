@@ -1845,7 +1845,31 @@ async function sendChatbotPPV(accountId, userId, text, price, vaultIds) {
   return await res.json();
 }
 
-async function handleChatbotMessage(accountId, userId, messageText) {
+// Debounce: batch rapid fan messages into one Claude call
+const pendingFanMessages = {}; // { userId: { messages: [], timer: null, accountId } }
+const DEBOUNCE_MS = 3000; // Wait 3s for more messages before responding
+
+function handleChatbotMessage(accountId, userId, messageText) {
+  // Quick checks before debounce
+  if (!pendingFanMessages[userId]) {
+    pendingFanMessages[userId] = { messages: [], timer: null, accountId };
+  }
+  pendingFanMessages[userId].messages.push(messageText);
+  pendingFanMessages[userId].accountId = accountId;
+  
+  // Clear existing timer and set new one
+  if (pendingFanMessages[userId].timer) clearTimeout(pendingFanMessages[userId].timer);
+  pendingFanMessages[userId].timer = setTimeout(() => {
+    const batch = pendingFanMessages[userId];
+    delete pendingFanMessages[userId];
+    const combined = batch.messages.join('\n');
+    processChatbotMessage(batch.accountId, userId, combined).catch(e => {
+      console.error('❌ Chatbot handler error:', e.message);
+    });
+  }, DEBOUNCE_MS);
+}
+
+async function processChatbotMessage(accountId, userId, messageText) {
   try {
     const enabled = await redis.get('chatbot:enabled');
     if (!enabled) return;
