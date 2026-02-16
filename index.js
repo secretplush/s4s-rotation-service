@@ -1567,42 +1567,31 @@ const sentItemsPerFan = {}; // { fanId: Set of vault IDs }
 function selectVaultItems(catalog, bundleCategory, itemCount, fanId) {
   const cat = catalog[bundleCategory];
   if (!cat || !cat.ids || cat.ids.length === 0) {
-    const fallback = catalog['bundle_1'] || catalog[Object.keys(catalog)[0]];
-    if (!fallback) return [];
-    return fallback.ids.slice(0, Math.min(itemCount || 5, fallback.ids.length));
+    // Fallback: try first available category
+    const fallbackKey = Object.keys(catalog).find(k => catalog[k]?.ids?.length > 0);
+    if (!fallbackKey) return [];
+    console.log(`🤖 Category "${bundleCategory}" not found, falling back to "${fallbackKey}"`);
+    return catalog[fallbackKey].ids.slice(0, Math.min(itemCount || 8, catalog[fallbackKey].ids.length));
   }
   
   const sentItems = sentItemsPerFan[fanId] || new Set();
+  const unsent = cat.ids.filter(id => !sentItems.has(id));
   
-  // Separate photos and videos, filter out sent items
-  const photoPool = (cat.photoIds || []).filter(id => !sentItems.has(id));
-  const videoPool = (cat.videoIds || []).filter(id => !sentItems.has(id));
-  
-  // If both pools empty, recycle
-  if (photoPool.length === 0 && videoPool.length === 0) {
-    if (fanId) console.log(`🤖 All items in ${bundleCategory} already sent to fan ${fanId} — recycling`);
-    photoPool.push(...(cat.photoIds || []));
-    videoPool.push(...(cat.videoIds || []));
+  // If all items sent, recycle
+  const pool = unsent.length > 0 ? unsent : cat.ids;
+  if (unsent.length === 0 && fanId) {
+    console.log(`🤖 All ${cat.ids.length} items in ${bundleCategory} already sent to fan ${fanId} — recycling`);
   }
   
-  // Build balanced bundle: pick up to 2 videos first, rest photos
-  const shuffledVideos = [...videoPool].sort(() => Math.random() - 0.5);
-  const shuffledPhotos = [...photoPool].sort(() => Math.random() - 0.5);
+  const count = Math.min(itemCount || 8, pool.length);
+  const shuffled = [...pool].sort(() => Math.random() - 0.5);
+  const selected = shuffled.slice(0, count);
   
-  const targetVideos = Math.min(2, shuffledVideos.length);
-  const targetTotal = Math.min(itemCount || 8, photoPool.length + videoPool.length);
-  const targetPhotos = Math.min(targetTotal - targetVideos, shuffledPhotos.length);
-  
-  const selected = [
-    ...shuffledVideos.slice(0, targetVideos),
-    ...shuffledPhotos.slice(0, targetPhotos)
-  ];
-  
-  // Track what we just selected
+  // Track sent items
   if (fanId) {
     if (!sentItemsPerFan[fanId]) sentItemsPerFan[fanId] = new Set();
     selected.forEach(id => sentItemsPerFan[fanId].add(id));
-    console.log(`🤖 Fan ${fanId}: sent ${targetPhotos}p + ${targetVideos}v (${sentItemsPerFan[fanId].size} unique total)`);
+    console.log(`🤖 Fan ${fanId}: ${selected.length} items selected from ${bundleCategory} (${sentItemsPerFan[fanId].size} unique total)`);
   }
   
   return selected;
