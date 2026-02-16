@@ -1486,7 +1486,10 @@ function buildFanContextString(ctx) {
 }
 
 // Select vault IDs from a category
-function selectVaultItems(catalog, bundleCategory, itemCount) {
+// Track sent vault items per fan to avoid duplicates
+const sentItemsPerFan = {}; // { fanId: Set of vault IDs }
+
+function selectVaultItems(catalog, bundleCategory, itemCount, fanId) {
   const cat = catalog[bundleCategory];
   if (!cat || !cat.ids || cat.ids.length === 0) {
     // Fallback: pick from a random starter bundle
@@ -1494,10 +1497,29 @@ function selectVaultItems(catalog, bundleCategory, itemCount) {
     if (!fallback) return [];
     return fallback.ids.slice(0, Math.min(itemCount || 5, fallback.ids.length));
   }
-  const count = Math.min(itemCount || cat.ids.length, cat.ids.length);
-  // Shuffle and pick
-  const shuffled = [...cat.ids].sort(() => Math.random() - 0.5);
-  return shuffled.slice(0, count);
+  
+  // Filter out previously sent items for this fan
+  const sentItems = sentItemsPerFan[fanId] || new Set();
+  const unsent = cat.ids.filter(id => !sentItems.has(id));
+  
+  // If all items in this category were sent, allow resending (with log)
+  const pool = unsent.length > 0 ? unsent : cat.ids;
+  if (unsent.length === 0 && fanId) {
+    console.log(`🤖 All ${cat.ids.length} items in ${bundleCategory} already sent to fan ${fanId} — recycling`);
+  }
+  
+  const count = Math.min(itemCount || pool.length, pool.length);
+  const shuffled = [...pool].sort(() => Math.random() - 0.5);
+  const selected = shuffled.slice(0, count);
+  
+  // Track what we just selected
+  if (fanId) {
+    if (!sentItemsPerFan[fanId]) sentItemsPerFan[fanId] = new Set();
+    selected.forEach(id => sentItemsPerFan[fanId].add(id));
+    console.log(`🤖 Fan ${fanId}: ${sentItemsPerFan[fanId].size} unique items sent total`);
+  }
+  
+  return selected;
 }
 
 async function getClaudeResponse(conversationHistory, newMessage, fanContext) {
@@ -1619,7 +1641,7 @@ async function handleChatbotMessage(accountId, userId, messageText) {
       try {
         if (response.action === 'ppv' && response.bundleCategory) {
           // Smart vault selection from category
-          const vaultIds = selectVaultItems(vault, response.bundleCategory, response.itemCount || 5);
+          const vaultIds = selectVaultItems(vault, response.bundleCategory, response.itemCount || 5, userId);
           if (vaultIds.length > 0) {
             await sendChatbotPPV(numericAccountId, userId, response.text, response.ppvPrice || 9.99, vaultIds);
             chatbotStats.ppvsSent++;
