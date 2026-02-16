@@ -1754,13 +1754,29 @@ async function handleChatbotMessage(accountId, userId, messageText) {
     // Helper to send a single message (text or PPV)
     async function sendSingleMessage(msg) {
       if (msg.action === 'ppv' && msg.bundleCategory) {
+        console.log(`🤖 PPV attempt: category=${msg.bundleCategory} price=${msg.ppvPrice} items=${msg.itemCount}`);
+        console.log(`🤖 Vault keys available:`, Object.keys(vault).join(', '));
         const vaultIds = selectVaultItems(vault, msg.bundleCategory, msg.itemCount || 8, userId);
+        console.log(`🤖 Selected ${vaultIds.length} vault IDs:`, vaultIds.slice(0, 5));
+        chatbotStats.debugLog = chatbotStats.debugLog || [];
+        chatbotStats.debugLog.push({ at: Date.now(), type: 'ppv_attempt', category: msg.bundleCategory, vaultIds: vaultIds.length, keys: Object.keys(vault).slice(0, 10) });
         if (vaultIds.length > 0) {
-          await sendChatbotPPV(numericAccountId, userId, msg.text, msg.ppvPrice || 9.99, vaultIds);
-          chatbotStats.ppvsSent++;
-          trackBotMessage(userId, true);
-          console.log(`🤖 PPV sent to ${userId}: $${msg.ppvPrice} [${msg.bundleCategory}] ${vaultIds.length} items`);
+          try {
+            const result = await sendChatbotPPV(numericAccountId, userId, msg.text, msg.ppvPrice || 9.99, vaultIds);
+            chatbotStats.ppvsSent++;
+            trackBotMessage(userId, true);
+            console.log(`🤖 PPV sent to ${userId}: $${msg.ppvPrice} [${msg.bundleCategory}] ${vaultIds.length} items`, JSON.stringify(result)?.substring(0, 200));
+            chatbotStats.debugLog.push({ at: Date.now(), type: 'ppv_success', result: JSON.stringify(result)?.substring(0, 300) });
+          } catch (ppvErr) {
+            console.error(`❌ PPV send FAILED:`, ppvErr.message);
+            chatbotStats.debugLog.push({ at: Date.now(), type: 'ppv_error', error: ppvErr.message });
+            // Fallback to text
+            await sendChatbotMessage(numericAccountId, userId, msg.text);
+            trackBotMessage(userId, false);
+          }
         } else {
+          console.log(`🤖 No vault IDs found for ${msg.bundleCategory}, sending as text`);
+          chatbotStats.debugLog.push({ at: Date.now(), type: 'ppv_no_vault', category: msg.bundleCategory });
           await sendChatbotMessage(numericAccountId, userId, msg.text);
           trackBotMessage(userId, false);
         }
