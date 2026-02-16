@@ -1873,6 +1873,20 @@ function handleChatbotMessage(accountId, userId, messageText) {
 
 async function processChatbotMessage(accountId, userId, messageText) {
   try {
+    // Check relay mode first — forwards messages to external brain (e.g. OpenClaw Opus)
+    const relayMode = await redis.get('chatbot:relay_mode');
+    if (relayMode) {
+      const testUserId = await redis.get('chatbot:test_user_id');
+      if (!testUserId || String(userId) !== String(testUserId)) return;
+      console.log(`🧠 RELAY MODE: Fan ${userId} said: "${messageText}"`);
+      // Push to relay queue — external brain polls this
+      const relayQueue = await redis.get('chatbot:relay:incoming') || [];
+      relayQueue.push({ userId: String(userId), accountId, text: messageText, at: Date.now() });
+      // Keep only last 20
+      await redis.set('chatbot:relay:incoming', relayQueue.slice(-20));
+      return;
+    }
+
     const enabled = await redis.get('chatbot:enabled');
     if (!enabled) return;
 
@@ -2036,6 +2050,28 @@ app.get('/chatbot/status', async (req, res) => {
     debugLog: chatbotStats.debugLog || [],
     account: MILLIE_USERNAME,
   });
+});
+
+// Relay mode — external brain (OpenClaw Opus) handles responses
+app.post('/chatbot/relay/enable', async (req, res) => {
+  await redis.set('chatbot:relay_mode', true);
+  await redis.set('chatbot:relay:incoming', []);
+  res.json({ relayMode: true, message: 'Relay mode ON — messages forwarded to external brain' });
+});
+
+app.post('/chatbot/relay/disable', async (req, res) => {
+  await redis.set('chatbot:relay_mode', false);
+  res.json({ relayMode: false, message: 'Relay mode OFF' });
+});
+
+// Poll for new fan messages (called by external brain)
+app.get('/chatbot/relay/poll', async (req, res) => {
+  const queue = await redis.get('chatbot:relay:incoming') || [];
+  // Clear after read
+  if (queue.length > 0) {
+    await redis.set('chatbot:relay:incoming', []);
+  }
+  res.json({ messages: queue });
 });
 
 app.post('/chatbot/enable', async (req, res) => {
