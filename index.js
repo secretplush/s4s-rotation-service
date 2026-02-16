@@ -1706,7 +1706,7 @@ async function handleChatbotMessage(accountId, userId, messageText) {
 
     // Update conversation history
     history.push({ role: 'user', content: messageText });
-    const allTexts = messages.map(m => m.text).join(' | ');
+    const allTexts = messages.map(m => m.text).join(' ... ');
     history.push({ role: 'assistant', content: allTexts });
     await redis.set(convKey, history.slice(-50));
 
