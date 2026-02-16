@@ -2236,11 +2236,17 @@ app.post('/webhooks/onlyfans', async (req, res) => {
   res.status(200).json({ ok: true });
 
   const { event, account_id, payload } = req.body;
+  console.log(`📨 Webhook received: event=${event}, account_id=${account_id}`);
   if (!event || !account_id) return;
 
-  const username = accountIdToUsername[account_id];
+  let username = accountIdToUsername[account_id];
+  // Fallback: ensure millie always resolves even if map not built yet
+  if (!username && account_id === MILLIE_ACCOUNT_ID) {
+    username = MILLIE_USERNAME;
+    console.log(`🔧 Webhook: millie fallback used (accountIdToUsername had ${Object.keys(accountIdToUsername).length} entries)`);
+  }
   if (!username) {
-    console.log(`⚠️ Webhook: unknown account_id ${account_id}`);
+    console.log(`⚠️ Webhook: unknown account_id ${account_id}, map has ${Object.keys(accountIdToUsername).length} entries`);
     return;
   }
 
