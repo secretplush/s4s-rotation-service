@@ -1914,6 +1914,12 @@ async function handleChatbotMessage(accountId, userId, messageText) {
           console.log(`🤖 Skipping duplicate PPV in same response (msg ${i+1})`);
           continue;
         }
+        // PPV cooldown: don't send another PPV if last one was < 3 fan messages ago
+        const convo = activeConversations[userId] || {};
+        if (msg.action === 'ppv' && convo.lastPpvAt && (convo.messagesSinceLastPpv || 0) < 3) {
+          console.log(`🤖 PPV cooldown: only ${convo.messagesSinceLastPpv || 0} fan messages since last PPV, converting to text`);
+          msg.action = 'message'; // Convert to text-only
+        }
         const delay = calcTypingDelay(msg.text, msg.action === 'ppv');
         
         console.log(`🤖 Queue ${i+1}/${messages.length}: "${msg.text?.substring(0,50)}..." delay=${delay}s`);
@@ -2001,7 +2007,13 @@ const activeConversations = {}; // { fanId: { lastBotMessageAt, lastFanMessageAt
 function trackBotMessage(userId, hasPPV = false) {
   if (!activeConversations[userId]) activeConversations[userId] = { bumpCount: 0 };
   activeConversations[userId].lastBotMessageAt = Date.now();
-  if (hasPPV) activeConversations[userId].pendingPPV = true;
+  if (hasPPV) {
+    activeConversations[userId].pendingPPV = true;
+    activeConversations[userId].lastPpvAt = Date.now();
+    activeConversations[userId].messagesSinceLastPpv = 0;
+  } else {
+    activeConversations[userId].messagesSinceLastPpv = (activeConversations[userId].messagesSinceLastPpv || 0) + 1;
+  }
 }
 
 function trackFanMessage(userId) {
@@ -2010,6 +2022,7 @@ function trackFanMessage(userId) {
   activeConversations[userId].bumpCount = 0; // Reset bumps when fan responds
   activeConversations[userId].pendingPPV = false;
   activeConversations[userId].lastBumpMessageId = null; // Clear bump tracking
+  activeConversations[userId].messagesSinceLastPpv = (activeConversations[userId].messagesSinceLastPpv || 0) + 1;
 }
 
 const BUMP_MESSAGES = {
