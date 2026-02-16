@@ -1744,14 +1744,8 @@ async function handleChatbotMessage(accountId, userId, messageText) {
       chatbotStats.messagesSent++;
     }
 
-    // Track pending message queues per fan so we can cancel on new incoming
-    // Store a generation counter — if it changes, a new fan message came in
-    if (!activeConversations[userId]) activeConversations[userId] = { bumpCount: 0 };
-    if (!activeConversations[userId].msgGeneration) activeConversations[userId].msgGeneration = 0;
-    activeConversations[userId].msgGeneration++;
-    const myGeneration = activeConversations[userId].msgGeneration;
-
-    // Send messages sequentially with cancellation check
+    // Send messages sequentially with realistic delays — don't cancel on overlap
+    // Real texting has crossover and that's fine. Claude handles context.
     const sendQueue = async () => {
       for (let i = 0; i < messages.length; i++) {
         const msg = messages[i];
@@ -1761,13 +1755,6 @@ async function handleChatbotMessage(accountId, userId, messageText) {
         
         // Wait the typing delay
         await new Promise(resolve => setTimeout(resolve, delay * 1000));
-        
-        // Check if fan sent a new message while we were "typing"
-        if (activeConversations[userId]?.msgGeneration !== myGeneration) {
-          console.log(`🤖 Cancelling queued messages for ${userId} — new fan message received (gen ${myGeneration} vs ${activeConversations[userId]?.msgGeneration})`);
-          // Update history to only include what we actually sent
-          return;
-        }
         
         try {
           await sendSingleMessage(msg);
@@ -1857,8 +1844,6 @@ function trackFanMessage(userId) {
   activeConversations[userId].bumpCount = 0; // Reset bumps when fan responds
   activeConversations[userId].pendingPPV = false;
   activeConversations[userId].lastBumpMessageId = null; // Clear bump tracking
-  // Increment generation to cancel any pending queued messages
-  activeConversations[userId].msgGeneration = (activeConversations[userId].msgGeneration || 0) + 1;
 }
 
 const BUMP_MESSAGES = {
