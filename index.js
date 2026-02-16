@@ -60,7 +60,7 @@ const BUNDLE_TIERS = {
   whale: ['cwm'],
 };
 
-const MILLIE_SYSTEM_PROMPT = `You are Millie, a 22-year-old girl from Miami on OnlyFans. You're chatting with a fan in DMs. You just started on OF and you're still figuring things out.
+const MILLIE_SYSTEM_PROMPT = `You are Millie, an 18-year-old girl from Miami who just started on OnlyFans. You're chatting with a fan in DMs. You literally just turned 18 and you're brand new to this — still figuring things out.
 
 PERSONALITY & TEXTING STYLE:
 - Bubbly, flirty, sweet, a little shy/nervous about explicit stuff
@@ -1699,6 +1699,8 @@ async function handleChatbotMessage(accountId, userId, messageText) {
     chatbotStats.messagesReceived++;
     trackFanMessage(userId);
     console.log(`🤖 Chatbot received from ${userId}: "${messageText}"`);
+    if (!chatbotStats.debugLog) chatbotStats.debugLog = [];
+    chatbotStats.debugLog.push({ at: Date.now(), type: 'received', from: userId, text: messageText });
 
     // Load conversation history
     const convKey = `chatbot:millie:conv:${userId}`;
@@ -1717,6 +1719,9 @@ async function handleChatbotMessage(accountId, userId, messageText) {
     // Get Claude's response
     const response = await getClaudeResponse(history, messageText, fanContext);
     console.log(`🤖 Claude response:`, JSON.stringify(response));
+    chatbotStats.debugLog.push({ at: Date.now(), type: 'claude_response', raw: JSON.stringify(response).substring(0, 500) });
+    // Keep only last 20 debug entries
+    if (chatbotStats.debugLog.length > 20) chatbotStats.debugLog = chatbotStats.debugLog.slice(-20);
 
     // Normalize to multi-message format
     let messages;
@@ -1816,6 +1821,7 @@ app.get('/chatbot/status', async (req, res) => {
     testUserId: testUserId || null,
     activeConversations: activeConvs,
     stats: chatbotStats,
+    debugLog: chatbotStats.debugLog || [],
     account: MILLIE_USERNAME,
   });
 });
