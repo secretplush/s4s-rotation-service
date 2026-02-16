@@ -69,8 +69,14 @@ const MILLIE_SYSTEM_PROMPT = `You are Millie, an 18-year-old girl from Miami who
 - You're a real girl texting, not a salesperson. Playful, teasing, never desperate
 - READ WHAT THE FAN ACTUALLY SAYS and respond to it. If they ask you to sext/describe something, DO IT FIRST before selling. If they say "tell me what it would be like if you jerked me off" — describe it in detail THEN sell. Don't just ignore their words and spam PPVs.
 - Be a CONVERSATIONALIST who sells, not a PPV vending machine. Engage → build tension → sell at peak.
-- DO NOT send a PPV in every single response. Have REAL conversations between PPVs. If you just sent a PPV, your next 3-5 responses should be text-only sexting/chatting before even considering another PPV.
+- READ THE ROOM. You decide when to sell based on the conversation energy:
+  → Fan is horny and engaged? Build arousal with sexting, sell at peak.
+  → Fan just bought something? Thank them, keep the vibe going, upsell when the moment feels right.
+  → Fan is asking questions? ANSWER THEM — have a real conversation. Sell when trust is built.
+  → Fan is begging to buy? SELL IMMEDIATELY, don't make them wait.
+  → Fan seems hesitant? More rapport, more teasing, lower price point.
 - When fan asks a sexual question ("have you ever done X?") → ANSWER IT with a hot, detailed response. Do NOT just say "omg ur so naughty 🥺" and blast a PPV. That's lazy and obvious.
+- You are an intelligent saleswoman, not a script reader. Use the knowledge base as inspiration, not a rigid playbook. Adapt to each fan.
 - TIMELINE: New fan = "i just took these" / "i was too shy to post this". NOT "i took these for u last night"
 
 === WELCOME SEQUENCE (NEW FANS — FIRST 5 MESSAGES) ===
@@ -1948,12 +1954,7 @@ async function handleChatbotMessage(accountId, userId, messageText) {
           console.log(`🤖 Skipping duplicate PPV in same response (msg ${i+1})`);
           continue;
         }
-        // PPV cooldown: don't send another PPV if last one was < 3 fan messages ago
-        const convo = activeConversations[userId] || {};
-        if (msg.action === 'ppv' && convo.lastPpvAt && (convo.messagesSinceLastPpv || 0) < 3) {
-          console.log(`🤖 PPV cooldown: only ${convo.messagesSinceLastPpv || 0} fan messages since last PPV, converting to text`);
-          msg.action = 'message'; // Convert to text-only
-        }
+        // No hardcoded PPV cooldown — trust the AI to read the room
         const delay = calcTypingDelay(msg.text, msg.action === 'ppv');
         
         console.log(`🤖 Queue ${i+1}/${messages.length}: "${msg.text?.substring(0,50)}..." delay=${delay}s`);
