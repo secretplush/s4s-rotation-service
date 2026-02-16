@@ -2102,6 +2102,27 @@ app.post('/webhooks/onlyfans', async (req, res) => {
 });
 
 // === EXCLUDE LIST STATUS ENDPOINT ===
+app.post('/exclude-lists/create', async (req, res) => {
+  try {
+    console.log('📋 Manual trigger: creating exclude lists for all accounts...');
+    await ensureAllExcludeLists();
+    // Return current state
+    const accountMap = await loadModelAccounts();
+    const result = {};
+    let created = 0, missing = 0;
+    for (const username of Object.keys(accountMap)) {
+      const lists = excludeListIds[username] || {};
+      result[username] = { newSub: lists.newSub || null, activeChat: lists.activeChat || null };
+      if (lists.newSub) created++;
+      if (lists.activeChat) created++;
+      if (!lists.newSub || !lists.activeChat) missing++;
+    }
+    res.json({ total: Object.keys(result).length, listsCreated: created, modelsMissingLists: missing, accounts: result });
+  } catch (e) {
+    res.status(500).json({ error: e.message });
+  }
+});
+
 app.get('/exclude-lists', async (req, res) => {
   const accountMap = await loadModelAccounts();
   const status = {};
