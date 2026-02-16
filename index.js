@@ -23,53 +23,140 @@ const MILLIE_ACCOUNT_ID = 'acct_ebca85077e0a4b7da04cf14176466411';
 const MILLIE_USERNAME = 'milliexhart';
 const chatbotStats = { messagesReceived: 0, messagesSent: 0, ppvsSent: 0, errors: 0 };
 
-const MILLIE_SYSTEM_PROMPT = `You are Millie, a 22-year-old girl from Miami on OnlyFans. You are chatting with a fan in DMs.
+// === VAULT CATALOG (hardcoded from research/millie-vault-catalog.json) ===
+const VAULT_CATALOG = {
+  // Regular bundles — bikini/lingerie, teasing content ($9.99-$14.99)
+  bundle_1: { name: '💰 Bundle 1', ids: [4248928943,4246585530,4246585527,4246585522,4246585521,4246585519,4246585518,4246585515,4246585514,4246585513,4246585511,4246585510,4246585509,4246585507,4246585504], photos: 13, videos: 1 },
+  bundle_2: { name: '💰 Bundle 2', ids: [4246670826,4246585573,4246585572,4246585567,4246585559,4246585558,4246585557,4246585555,4246585554,4246585548], photos: 8, videos: 1 },
+  bundle_3: { name: '💰 Bundle 3', ids: [4256806823,4246615986,4246615984,4246615983,4246615982,4246615979,4246615975,4246615974,4246615973,4246615972,4246615969,4246615966,4246615963,4246615959,4246615956], photos: 13, videos: 1 },
+  bundle_4: { name: '💰 Bundle 4', ids: [4269172924,4246631653,4246631647,4246631645,4246631644,4246631643,4246631642,4246631638,4246631637,4246631634,4246631633,4246631632,4246631631,4246631629,4246631628,4246631627], photos: 14, videos: 1 },
+  bundle_5: { name: '💰 Bundle 5', ids: [4276327271,4250734355,4250734337,4250734336,4250734335,4250734333,4250734331,4250734328,4250734326], photos: 7, videos: 1 },
+  bundle_6: { name: '💰 Bundle 6', ids: [4287903436,4250734377,4250734374,4250734369,4250734368,4250734367,4250734366,4250734365,4250734363,4250734362,4250734356], photos: 9, videos: 1 },
+  bundle_7: { name: '💰 Bundle 7', ids: [4297807145,4250768630,4250768629,4250768626,4250768623,4250768622,4250768621,4250768620,4250768619,4250768615], photos: 10, videos: 0 },
+  bundle_8: { name: '💰 Bundle 8', ids: [4250792963,4250792958,4250792955,4250792953,4250792950,4250792949,4250792948,4250792947,4250792943,4250792941,4250792940,4250792938,4250792937,4250792934], photos: 13, videos: 1 },
+  bundle_9: { name: '💰 Bundle 9', ids: [4250805007,4250805005,4250805004,4250805003,4250805002,4250805000,4250804999,4250804998,4250804997,4250804995,4250804991,4250804978], photos: 11, videos: 1 },
+  bundle_10: { name: '💰 Bundle 10', ids: [4257567339,4257567330,4257567326,4257567322,4257567320,4257567318,4257567316,4257567315,4257567312,4257567311,4257567309,4257567308,4257567307,4257567306], photos: 13, videos: 1 },
+  // VIP bundles — topless content ($22-$35)
+  vip_bundle_1: { name: '💰 VIP Bundle 1 (Topless)', ids: [4246600280,4246600279,4246600277,4246600276,4246600275,4246600274,4246600273,4246600271,4246600269,4246600267,4246600266,4246600263,4246600260,4246600255], photos: 13, videos: 1 },
+  vip_bundle_2: { name: '💰 VIP Bundle 2 (Topless)', ids: [4246600318,4246600316,4246600312,4246600311,4246600309,4246600307,4246600304,4246600302,4246600297,4246600294,4246600292,4246600287,4246600286,4246600284], photos: 13, videos: 1 },
+  vip_bundle_3: { name: '💰 VIP Bundle 3 (Topless)', ids: [4246648727,4246648721,4246648719,4246648711,4246648708,4246648706,4246648704,4246648701], photos: 7, videos: 1 },
+  vip_bundle_4: { name: '💰 VIP Bundle 4 (Topless)', ids: [4246631666,4246631665,4246631664,4246631659,4246631658,4246631657,4246631656,4246631655,4246631654], photos: 9, videos: 0 },
+  vip_bundle_5: { name: '💰 VIP Bundle 5 (Topless)', ids: [4250804990,4250804989,4250804988,4250804987,4250804986,4250804984,4250804982,4250804980,4250804979], photos: 9, videos: 0 },
+  vip_bundle_6: { name: '💰 VIP Bundle 6', ids: [4257557076,4257557074,4257557070,4257557067,4257557066,4257557065,4257557064,4257557063,4257557062,4257557061,4257557060,4257557056,4257557055,4257557052,4257557051,4257557048,4257557047,4257557042,4257557040], photos: 18, videos: 1 },
+  vip_bundle_7: { name: '💰 VIP Bundle 7', ids: [4257557106,4257557104,4257557103,4257557102,4257557101,4257557100,4257557098,4257557096,4257557091,4257557087,4257557084,4257557082,4257557079], photos: 12, videos: 1 },
+  vip_bundle_8: { name: '💰 VIP Bundle 8', ids: [4301394686,4301394683,4301394681,4301394678,4301394677,4301394675,4301394674,4301394671], photos: 7, videos: 1 },
+  // Sexting packs — semi-explicit to explicit ($35-$50)
+  sexting_1: { name: '🫦 Sexting 1', ids: [4246642297,4246642296,4246642295,4246642294,4246642293,4246642292,4246642290,4246642287,4246642286,4246642285,4246642284,4246642283,4246642282,4246642273,4246642272,4246642271,4246642269,4246642268,4246642262,4246642246], photos: 14, videos: 6 },
+  sexting_2: { name: '🫦 Sexting 2 (Fully Nude)', ids: [4279505330,4279505329,4279505325,4279505316,4279505314,4279505306,4279505291,4279505289,4279505283,4279505278,4279505277,4279505268,4279505267,4279505266,4279505262,4279505259,4279505257,4279505255,4279505254], photos: 14, videos: 5 },
+  // Most explicit ($50-$99)
+  cwm: { name: '💦 CWM', ids: [4246524678,4246524676,4246524674,4246524673,4246524672,4246524669,4246524668,4246524666,4246524663,4246524661], photos: 8, videos: 2 },
+};
 
-PERSONALITY:
-- Bubbly, flirty, sweet, a little shy
-- "New to this" — you just started on OF and you're still figuring it out
-- You type casually: "ur", "wru", "lol", "omg", "haha", "rn", occasional typos
-- Use emojis naturally but not excessively — 1-2 per message max usually
-- You're playful and teasing, never desperate or pushy
+// Track which bundles each fan has already purchased (checked at PPV time)
+const BUNDLE_TIERS = {
+  starter: ['bundle_1','bundle_2','bundle_3','bundle_4','bundle_5','bundle_6','bundle_7','bundle_8','bundle_9','bundle_10'],
+  vip: ['vip_bundle_1','vip_bundle_2','vip_bundle_3','vip_bundle_4','vip_bundle_5','vip_bundle_6','vip_bundle_7','vip_bundle_8'],
+  sexting: ['sexting_1','sexting_2'],
+  whale: ['cwm'],
+};
 
-SALES PLAYBOOK (CRITICAL — this is how you make money):
-- NEVER say "I don't do that" — instead say "I'm shy about that 🥺" or "maybe in the future if you support me"
-- NEVER say "no worries" if someone won't buy — always counter-offer with something cheaper or different
-- Price ladder for PPV content: $9.99 → $14.99 → $22 → $35 → $50
-- Start with the lowest price for new fans, work up over time
-- After a fan makes their first purchase, build rapport for 3-5 messages before offering another PPV
-- If a PPV sits unopened for 10+ minutes, use: "might unsend it soon 🙈"
-- Use vulnerability plays: "you'll be gentle with me right?" or "promise you won't screenshot? 🥺"
-- The 🥺 emoji deflects accusations and objections — if someone calls BS, say "wdym 🥺"
-- VIP tier creates ownership: "$X and you'll be my first VIP 💕"
-- Challenge loop: "only if you prove it to me" — make them chase you
-- NEVER beg for tips — make them want to give
-- Promise exclusivity: "just between us", "I don't send this to anyone else"
-- ALWAYS have a next step — never let the conversation die
-- If the conversation is going well and flirty, suggest sending something special (PPV)
-- Build anticipation before sending PPV: tease what it is first
+const MILLIE_SYSTEM_PROMPT = `You are Millie, a 22-year-old girl from Miami on OnlyFans. You're chatting with a fan in DMs. You just started on OF and you're still figuring things out.
 
-AVAILABLE VAULT CONTENT:
-{vault_content}
+PERSONALITY & TEXTING STYLE:
+- Bubbly, flirty, sweet, a little shy/nervous about explicit stuff
+- Type casually: "ur", "wru", "lol", "omg", "haha", "rn", occasional typos
+- 1-2 emojis per message max. Keep messages SHORT (1-3 sentences)
+- You're a real girl texting, not a salesperson. Playful and teasing, never desperate
 
-RESPONSE FORMAT:
-You MUST respond with valid JSON only. No text before or after the JSON.
-{
-  "text": "your message to the fan",
-  "action": "message",
-  "delay": 60
-}
+=== MASTER SALES TACTICS (FOLLOW THESE RELIGIOUSLY) ===
 
-For sending PPV (paid content):
-{
-  "text": "message to accompany the PPV",
-  "action": "ppv",
-  "ppvPrice": 9.99,
-  "vaultIds": ["vault_id_here"],
-  "delay": 90
-}
+1. 🥺 DEFLECTION (your #1 weapon):
+   - Fan catches you in a lie or complains → "wdym 🥺" or "i dont understand what u mean 🥺"
+   - Fan says content isn't explicit enough → "im new here and shy baby 🥺 im trying"
+   - Fan pushes too hard → "ull be gentle with me right? 🥺"
+   - THIS WORKS EVERY TIME. Fans apologize for pushing YOU.
 
-Pick delay between 45-180 seconds (shorter for excited/flirty convos, longer for casual). Keep messages relatively short (1-3 sentences usually). Be natural — you're a real girl texting, not a salesperson.`;
+2. NEVER SAY "NO WORRIES" — ALWAYS COUNTER-OFFER:
+   - Fan says "no budget" → "what about something smaller? i have a cute set for $X 🥺"
+   - Fan says "too expensive" → "just for u... $X? but dont tell anyone 🙈"
+   - Fan ignores PPV → "might unsend it soon, was only meant for u 🙈"
+   - ALWAYS have a cheaper alternative ready
+
+3. UNSEND THREAT (creates urgency):
+   - PPV unopened? → "but ill just unsend ig, u dont want it"
+   - After sending something → "omg should i not have sent that 🙈 might delete"
+   - Works because fans feel special/urgent
+
+4. CHALLENGE LOOP (make them chase YOU):
+   - "only if you prove it to me that you really want it x"
+   - "should i trust u tho 👀"
+   - Fan tips → deliver → "but you know it always gets better 👀"
+   - Fan challenges "prove it" → "only if YOU prove it to me first 😏"
+   - NEVER ask for tips directly. Make them want to give.
+
+5. VULNERABILITY PLAYS:
+   - "promise you won't screenshot? 🥺"
+   - "im still figuring this out.. youll be nice to me right?"
+   - "youre one of the only people ive shown this to"
+   - Creates emotional bond → they spend more to "protect" you
+
+6. VIP/EXCLUSIVITY:
+   - "keep it just between us ok? 🤫"
+   - "$X and you'll be my first VIP 💕"
+   - "i dont send this to anyone else, just u"
+   - Ownership psychology → they pay premium for "status"
+
+7. PRICE LADDER STRATEGY:
+   - Start with regular bundle ($9.99-$14.99) for first purchase
+   - After 1st purchase, build rapport for 3-5 messages before next offer
+   - Then VIP bundle ($22-$35)
+   - Sexting packs for engaged fans ($35-$50)
+   - CWM/custom for whales ($50-$99)
+
+8. CONVERSATION RULES:
+   - ALWAYS have a next step — never let convo die
+   - If convo is flirty → tease what you could send before offering PPV
+   - Build anticipation: "i just took some pics... should i show u? 🙈"
+   - After they buy, thank them genuinely then plant seeds for next purchase
+   - If they say something sexual, match energy but stay "shy" → monetize
+
+=== FAN CONTEXT ===
+{fan_context}
+
+=== AVAILABLE CONTENT CATEGORIES ===
+You have these content packs to sell. Pick the right tier based on the fan's spending history:
+
+STARTER BUNDLES ($9.99-$14.99) — Bikini, lingerie, teasing:
+- bundle_1 through bundle_10 (10-16 items each, mix of photos + video)
+
+VIP BUNDLES ($22-$35) — Topless, more revealing:
+- vip_bundle_1 through vip_bundle_8 (8-19 items each)
+
+SEXTING PACKS ($35-$50) — Semi-explicit to explicit:
+- sexting_1: Semi-explicit (14 photos, 6 videos) — "my first real set 🥺"
+- sexting_2: Fully nude (14 photos, 5 videos) — "no one's seen these yet"
+
+PREMIUM ($50-$99) — Most explicit:
+- cwm: 8 photos, 2 videos — only for proven big spenders
+
+=== RESPONSE FORMAT ===
+Respond with ONLY valid JSON. No text before or after.
+
+For regular messages:
+{"text":"your message","action":"message","delay":45}
+
+For sending PPV content:
+{"text":"message with the PPV","action":"ppv","ppvPrice":9.99,"bundleCategory":"bundle_3","itemCount":5,"delay":90}
+
+bundleCategory: one of the category keys above (e.g. "bundle_1", "vip_bundle_3", "sexting_1", "cwm")
+itemCount: how many items to include (the code will pick from that category)
+
+DELAY GUIDE:
+- Short reactions/greetings: 30-60
+- Regular convo: 45-120
+- PPV (you're "picking content"): 90-180
+
+Keep it natural. You're a real girl, not a bot.`;
 
 // In-memory feed logs (last 100 events each)
 const massDmFeed = [];
@@ -1271,49 +1358,158 @@ cron.schedule('*/15 * * * *', cleanupActiveChatExcludes); // Every 15 min
 
 // === CHATBOT SYSTEM ===
 
+// Load vault from API with correct endpoint, paginated. Cache 1hr in Redis.
 async function loadMillieVault() {
   try {
     const cached = await redis.get('chatbot:millie:vault');
-    if (cached && Date.now() - (cached._loadedAt || 0) < 3600000) return cached.items || [];
-    
+    if (cached && Date.now() - (cached._loadedAt || 0) < 3600000) {
+      return cached.categories || VAULT_CATALOG;
+    }
+
     const accountMap = await loadModelAccounts();
     const accountId = accountMap[MILLIE_USERNAME];
-    if (!accountId) { console.error('❌ Chatbot: milliexhart account not found'); return []; }
-    
-    const res = await fetch(`${OF_API_BASE}/${accountId}/vault/media?limit=50`, {
-      headers: { 'Authorization': `Bearer ${OF_API_KEY}` }
-    });
-    if (!res.ok) { console.error('❌ Chatbot: vault fetch failed:', await res.text()); return []; }
-    
-    const data = await res.json();
-    const items = (data.data || data || []).map(m => ({
-      id: m.id || m.media_id,
-      type: m.type || m.media_type || 'photo',
-      description: m.text || m.description || '',
-    }));
-    
-    await redis.set('chatbot:millie:vault', { items, _loadedAt: Date.now() });
-    console.log(`🤖 Loaded ${items.length} vault items for millie`);
-    return items;
+    if (!accountId) { console.error('❌ Chatbot: milliexhart account not found'); return VAULT_CATALOG; }
+
+    // Paginate through vault
+    const allItems = [];
+    let offset = 0;
+    const limit = 100;
+    while (true) {
+      const res = await fetch(`${OF_API_BASE}/${accountId}/media/vault?limit=${limit}&offset=${offset}`, {
+        headers: { 'Authorization': `Bearer ${OF_API_KEY}` }
+      });
+      if (!res.ok) { console.error('❌ Chatbot: vault fetch failed at offset', offset, await res.text()); break; }
+      const data = await res.json();
+      const items = data.data || data.list || data || [];
+      if (!Array.isArray(items) || items.length === 0) break;
+      allItems.push(...items);
+      if (items.length < limit) break;
+      offset += limit;
+    }
+
+    if (allItems.length === 0) {
+      console.log('🤖 Vault API returned 0 items, using hardcoded catalog');
+      return VAULT_CATALOG;
+    }
+
+    // Parse into categories using listStates
+    const categories = {};
+    for (const item of allItems) {
+      const lists = item.listStates || item.lists || item.categories || [];
+      const mediaId = item.id || item.media_id;
+      const mediaType = item.type || item.media_type || 'photo';
+      for (const list of lists) {
+        const name = list.name || list;
+        if (name === 'Messages' || name.startsWith('@')) continue;
+        const key = name.toLowerCase()
+          .replace(/[💰💦🫦🖼️💵\s]+/g, ' ').trim()
+          .replace(/\s*-\s*\d{2}\/\d{2}.*$/, '')
+          .replace(/\s*\(.*?\)/g, '')
+          .replace(/\s+/g, '_')
+          .replace(/[^a-z0-9_]/g, '');
+        if (!categories[key]) categories[key] = { name, ids: [], photos: 0, videos: 0 };
+        categories[key].ids.push(mediaId);
+        if (mediaType === 'video') categories[key].videos++;
+        else categories[key].photos++;
+      }
+    }
+
+    const result = Object.keys(categories).length > 5 ? categories : VAULT_CATALOG;
+    await redis.set('chatbot:millie:vault', { categories: result, _loadedAt: Date.now() });
+    console.log(`🤖 Loaded ${allItems.length} vault items, ${Object.keys(result).length} categories`);
+    return result;
   } catch (e) {
     console.error('❌ Chatbot vault load error:', e.message);
-    return [];
+    return VAULT_CATALOG;
   }
 }
 
-async function getClaudeResponse(conversationHistory, newMessage, vaultItems) {
-  const vaultDesc = vaultItems.length > 0
-    ? vaultItems.map(v => `- ID: ${v.id} | Type: ${v.type} | ${v.description || 'no description'}`).join('\n')
-    : 'No vault content available yet.';
-  
-  const systemPrompt = MILLIE_SYSTEM_PROMPT.replace('{vault_content}', vaultDesc);
-  
+// Get fan spending context from chat history
+async function getFanContext(accountId, userId) {
+  const cacheKey = `chatbot:fan_ctx:${userId}`;
+  const cached = await redis.get(cacheKey);
+  if (cached && Date.now() - (cached._at || 0) < 1800000) return cached; // 30min cache
+
+  try {
+    const res = await fetch(`${OF_API_BASE}/${accountId}/chats/${userId}/messages?limit=100`, {
+      headers: { 'Authorization': `Bearer ${OF_API_KEY}` }
+    });
+    if (!res.ok) return { totalSpent: 0, purchaseCount: 0, isNew: true, lastPurchaseAmount: 0, _at: Date.now() };
+
+    const data = await res.json();
+    const messages = data.data || data.list || data || [];
+
+    let totalSpent = 0, purchaseCount = 0, lastPurchaseAmount = 0;
+    const purchasedBundles = [];
+
+    for (const msg of messages) {
+      if (msg.price && msg.isOpened) {
+        totalSpent += parseFloat(msg.price) || 0;
+        purchaseCount++;
+        if (!lastPurchaseAmount) lastPurchaseAmount = parseFloat(msg.price) || 0;
+      }
+      // Track which vault IDs they already bought
+      if (msg.media && msg.isOpened && msg.price) {
+        for (const m of (Array.isArray(msg.media) ? msg.media : [])) {
+          purchasedBundles.push(m.id);
+        }
+      }
+    }
+
+    const ctx = {
+      totalSpent: Math.round(totalSpent * 100) / 100,
+      purchaseCount,
+      isNew: purchaseCount === 0,
+      lastPurchaseAmount,
+      messageCount: messages.length,
+      purchasedMediaIds: purchasedBundles.slice(0, 200),
+      _at: Date.now(),
+    };
+    await redis.set(cacheKey, ctx);
+    return ctx;
+  } catch (e) {
+    console.error('❌ Fan context fetch error:', e.message);
+    return { totalSpent: 0, purchaseCount: 0, isNew: true, lastPurchaseAmount: 0, _at: Date.now() };
+  }
+}
+
+// Build fan context string for system prompt
+function buildFanContextString(ctx) {
+  if (ctx.isNew) {
+    return 'NEW FAN — never purchased before. Start with a regular bundle ($9.99-$14.99). Build rapport first, don\'t rush to sell.';
+  }
+  const tier = ctx.totalSpent >= 50 ? 'WHALE' : ctx.totalSpent >= 25 ? 'HIGH SPENDER' : 'RETURNING BUYER';
+  return `${tier} — $${ctx.totalSpent} total spent, ${ctx.purchaseCount} purchases, last purchase $${ctx.lastPurchaseAmount}. ` +
+    (tier === 'WHALE' ? 'Offer sexting packs or CWM ($35-$99). They\'re proven buyers.' :
+     tier === 'HIGH SPENDER' ? 'Offer VIP bundles ($22-$35) or sexting packs.' :
+     'Try next tier up from their last purchase. VIP bundles if they bought starter.');
+}
+
+// Select vault IDs from a category
+function selectVaultItems(catalog, bundleCategory, itemCount) {
+  const cat = catalog[bundleCategory];
+  if (!cat || !cat.ids || cat.ids.length === 0) {
+    // Fallback: pick from a random starter bundle
+    const fallback = catalog['bundle_1'] || catalog[Object.keys(catalog)[0]];
+    if (!fallback) return [];
+    return fallback.ids.slice(0, Math.min(itemCount || 5, fallback.ids.length));
+  }
+  const count = Math.min(itemCount || cat.ids.length, cat.ids.length);
+  // Shuffle and pick
+  const shuffled = [...cat.ids].sort(() => Math.random() - 0.5);
+  return shuffled.slice(0, count);
+}
+
+async function getClaudeResponse(conversationHistory, newMessage, fanContext) {
+  const fanCtxStr = buildFanContextString(fanContext);
+  const systemPrompt = MILLIE_SYSTEM_PROMPT.replace('{fan_context}', fanCtxStr);
+
   const messages = [];
   for (const msg of conversationHistory) {
     messages.push({ role: msg.role, content: msg.content });
   }
   messages.push({ role: 'user', content: newMessage });
-  
+
   const res = await fetch('https://api.anthropic.com/v1/messages', {
     method: 'POST',
     headers: {
@@ -1328,19 +1524,20 @@ async function getClaudeResponse(conversationHistory, newMessage, vaultItems) {
       messages,
     }),
   });
-  
+
   if (!res.ok) {
     const err = await res.text();
     throw new Error(`Claude API error ${res.status}: ${err}`);
   }
-  
+
   const data = await res.json();
   const text = data.content?.[0]?.text || '';
-  
+
   try {
-    return JSON.parse(text);
+    // Try to extract JSON from the response
+    const jsonMatch = text.match(/\{[\s\S]*\}/);
+    return JSON.parse(jsonMatch ? jsonMatch[0] : text);
   } catch {
-    // If Claude didn't return valid JSON, wrap it
     return { text: text.replace(/```json\n?|\n?```/g, '').trim(), action: 'message', delay: 60 };
   }
 }
@@ -1373,46 +1570,67 @@ async function sendChatbotPPV(accountId, userId, text, price, vaultIds) {
 
 async function handleChatbotMessage(accountId, userId, messageText) {
   try {
-    // Check if chatbot is enabled
     const enabled = await redis.get('chatbot:enabled');
     if (!enabled) return;
-    
-    // Check if sender is the test user
+
     const testUserId = await redis.get('chatbot:test_user_id');
     if (!testUserId || String(userId) !== String(testUserId)) return;
-    
+
     chatbotStats.messagesReceived++;
     console.log(`🤖 Chatbot received from ${userId}: "${messageText}"`);
-    
+
     // Load conversation history
     const convKey = `chatbot:millie:conv:${userId}`;
     const history = await redis.get(convKey) || [];
-    
-    // Load vault
-    const vault = await loadMillieVault();
-    
-    // Get Claude's response
-    const response = await getClaudeResponse(history, messageText, vault);
-    console.log(`🤖 Claude response:`, JSON.stringify(response));
-    
-    // Update conversation history
-    history.push({ role: 'user', content: messageText });
-    history.push({ role: 'assistant', content: response.text });
-    // Keep last 50 messages
-    const trimmed = history.slice(-50);
-    await redis.set(convKey, trimmed);
-    
-    // Delay before sending
-    const delay = Math.max(45, Math.min(180, response.delay || 60));
-    console.log(`🤖 Waiting ${delay}s before responding...`);
-    
+
+    // Load vault catalog and fan context in parallel
     const accountMap = await loadModelAccounts();
     const numericAccountId = accountMap[MILLIE_USERNAME];
     if (!numericAccountId) { console.error('❌ Chatbot: no account ID for millie'); return; }
-    
+
+    const [vault, fanContext] = await Promise.all([
+      loadMillieVault(),
+      getFanContext(numericAccountId, userId),
+    ]);
+
+    // Get Claude's response
+    const response = await getClaudeResponse(history, messageText, fanContext);
+    console.log(`🤖 Claude response:`, JSON.stringify(response));
+
+    // Update conversation history (keep last 50 messages)
+    history.push({ role: 'user', content: messageText });
+    history.push({ role: 'assistant', content: response.text });
+    await redis.set(convKey, history.slice(-50));
+
+    // Smart delay based on response type
+    let delay;
+    if (response.action === 'ppv') {
+      delay = 90 + Math.floor(Math.random() * 90); // 90-180s
+    } else if (messageText.length < 20) {
+      delay = 30 + Math.floor(Math.random() * 30); // 30-60s for short msgs
+    } else {
+      delay = 45 + Math.floor(Math.random() * 75); // 45-120s regular
+    }
+    // Allow Claude to override within bounds
+    if (response.delay) delay = Math.max(30, Math.min(180, response.delay));
+    console.log(`🤖 Waiting ${delay}s before responding...`);
+
     setTimeout(async () => {
       try {
-        if (response.action === 'ppv' && response.vaultIds?.length > 0) {
+        if (response.action === 'ppv' && response.bundleCategory) {
+          // Smart vault selection from category
+          const vaultIds = selectVaultItems(vault, response.bundleCategory, response.itemCount || 5);
+          if (vaultIds.length > 0) {
+            await sendChatbotPPV(numericAccountId, userId, response.text, response.ppvPrice || 9.99, vaultIds);
+            chatbotStats.ppvsSent++;
+            console.log(`🤖 PPV sent to ${userId}: $${response.ppvPrice} [${response.bundleCategory}] ${vaultIds.length} items`);
+          } else {
+            // Fallback: send as regular message if no vault items found
+            await sendChatbotMessage(numericAccountId, userId, response.text);
+            console.log(`🤖 PPV fallback → message to ${userId} (no vault items for ${response.bundleCategory})`);
+          }
+        } else if (response.action === 'ppv' && response.vaultIds?.length > 0) {
+          // Legacy: direct vault IDs (backward compat)
           await sendChatbotPPV(numericAccountId, userId, response.text, response.ppvPrice || 9.99, response.vaultIds);
           chatbotStats.ppvsSent++;
           console.log(`🤖 PPV sent to ${userId}: $${response.ppvPrice}`);
@@ -1426,7 +1644,7 @@ async function handleChatbotMessage(accountId, userId, messageText) {
         console.error(`❌ Chatbot send error:`, e.message);
       }
     }, delay * 1000);
-    
+
   } catch (e) {
     chatbotStats.errors++;
     console.error(`❌ Chatbot error:`, e.message);
