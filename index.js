@@ -774,8 +774,8 @@ async function runRotationCycle() {
 // Run rotation cycle every minute
 cron.schedule('* * * * *', runRotationCycle);
 
-// Also run delete check every 30 seconds for faster cleanup
-cron.schedule('*/30 * * * * *', async () => {
+// Run delete check every minute (was 30s — saves ~50% delete-check calls)
+cron.schedule('* * * * *', async () => {
   if (!isRunning) return;
   
   const pending = await getPendingDeletes();
@@ -1581,10 +1581,10 @@ async function addActiveChatExcludeTracked(username, accountId, fanId) {
 
 // Cron schedules for cleanup
 cron.schedule('0 * * * *', cleanupNewSubExcludes);       // Every hour
-cron.schedule('*/15 * * * *', cleanupActiveChatExcludes); // Every 15 min
+cron.schedule('0 * * * *', cleanupActiveChatExcludes);   // Every hour (was 15 min — saves ~75% cleanup calls)
 
-// Auto-detect new models and create their exclude lists (every 10 min)
-cron.schedule('*/10 * * * *', async () => {
+// Auto-detect new models and create their exclude lists (every 2 hours — was 10 min)
+cron.schedule('0 */2 * * *', async () => {
   try {
     const accountMap = await loadModelAccounts();
     const newModels = Object.keys(accountMap).filter(u => !excludeListIds[u] || !excludeListIds[u].newSub || !excludeListIds[u].activeChat);
@@ -1858,7 +1858,11 @@ async function sendChatbotPPV(accountId, userId, text, price, vaultIds) {
 const pendingFanMessages = {}; // { userId: { messages: [], timer: null, accountId } }
 const DEBOUNCE_MS = 3000; // Wait 3s for more messages before responding
 
+// Chatbot kill switch — set to true to skip all expensive API lookups when Anthropic key is dead
+const CHATBOT_DISABLED = true;
+
 function handleChatbotMessage(accountId, userId, messageText) {
+  if (CHATBOT_DISABLED) return; // Skip all processing when chatbot is disabled
   // Quick checks before debounce
   if (!pendingFanMessages[userId]) {
     pendingFanMessages[userId] = { messages: [], timer: null, accountId };
@@ -2231,7 +2235,7 @@ async function runBumpCheck() {
 }
 
 // Run bump check every 5 minutes
-setInterval(runBumpCheck, 5 * 60 * 1000);
+if (!CHATBOT_DISABLED) setInterval(runBumpCheck, 5 * 60 * 1000); // Skip bumps when chatbot is off
 console.log('🤖 Chatbot bump system active (checking every 5 min)');
 
 // === WEBHOOK ENDPOINT ===
