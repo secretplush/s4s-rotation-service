@@ -1744,6 +1744,18 @@ app.post('/chatbot/test-user/:userId', async (req, res) => {
   res.json({ testUserId: userId, message: `Test user set to ${userId}` });
 });
 
+app.post('/chatbot/reset/:userId', async (req, res) => {
+  const { userId } = req.params;
+  await redis.del(`chatbot:millie:conv:${userId}`);
+  // Clear sent items tracking
+  delete sentItemsPerFan[userId];
+  chatbotStats.messagesReceived = 0;
+  chatbotStats.messagesSent = 0;
+  chatbotStats.ppvsSent = 0;
+  chatbotStats.errors = 0;
+  res.json({ reset: true, userId, message: `Conversation and stats reset for ${userId}` });
+});
+
 // === WEBHOOK ENDPOINT ===
 // Receives events from OnlyFans API webhooks
 // Configure webhook URL in OnlyFans API dashboard: https://<your-domain>/webhooks/onlyfans
