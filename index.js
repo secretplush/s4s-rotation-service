@@ -1509,6 +1509,24 @@ async function addActiveChatExcludeTracked(username, accountId, fanId) {
 cron.schedule('0 * * * *', cleanupNewSubExcludes);       // Every hour
 cron.schedule('*/15 * * * *', cleanupActiveChatExcludes); // Every 15 min
 
+// Auto-detect new models and create their exclude lists (every 10 min)
+cron.schedule('*/10 * * * *', async () => {
+  try {
+    const accountMap = await loadModelAccounts();
+    const newModels = Object.keys(accountMap).filter(u => !excludeListIds[u] || !excludeListIds[u].newSub || !excludeListIds[u].activeChat);
+    if (newModels.length > 0) {
+      console.log(`📋 Auto-detect: ${newModels.length} models missing exclude lists: ${newModels.join(', ')}`);
+      for (const username of newModels) {
+        await ensureExcludeListsForAccount(username, accountMap[username]);
+        await new Promise(r => setTimeout(r, 2000)); // Rate limit buffer
+      }
+      console.log(`📋 Auto-detect: finished creating lists for new models`);
+    }
+  } catch (e) {
+    console.error('❌ Auto-detect new models error:', e.message);
+  }
+});
+
 // === CHATBOT SYSTEM ===
 
 // Load vault from API with correct endpoint, paginated. Cache 1hr in Redis.
