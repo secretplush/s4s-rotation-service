@@ -2140,6 +2140,70 @@ app.post('/chatbot/relay/respond', async (req, res) => {
   }
 });
 
+// Get vault catalog with bundle tiers (0 OF API credits — all hardcoded)
+app.get('/chatbot/relay/vault', async (req, res) => {
+  const catalog = {};
+  for (const [key, bundle] of Object.entries(VAULT_CATALOG)) {
+    catalog[key] = { name: bundle.name, photos: bundle.photos, videos: bundle.videos || 0, itemCount: bundle.ids.length };
+  }
+  res.json({ bundles: catalog, tiers: BUNDLE_TIERS });
+});
+
+// Send a named bundle as PPV to a fan
+app.post('/chatbot/relay/send-bundle', async (req, res) => {
+  const { userId, bundleName, price, text } = req.body;
+  if (!userId || !bundleName || !price) return res.status(400).json({ error: 'userId, bundleName, and price required' });
+  
+  const bundle = VAULT_CATALOG[bundleName];
+  if (!bundle) return res.status(400).json({ error: `Unknown bundle: ${bundleName}`, available: Object.keys(VAULT_CATALOG) });
+  
+  try {
+    const accountMap = await loadModelAccounts();
+    const accountId = accountMap[MILLIE_USERNAME];
+    if (!accountId) return res.status(500).json({ error: 'millie account not found' });
+    
+    const sendRes = await fetch(`${OF_API_BASE}/${accountId}/chats/${userId}/messages`, {
+      method: 'POST',
+      headers: { 'Authorization': `Bearer ${OF_API_KEY}`, 'Content-Type': 'application/json' },
+      body: JSON.stringify({ text: text || 'just for u 🙈💕', price: parseFloat(price), mediaFiles: bundle.ids })
+    });
+    const data = await sendRes.json();
+    console.log(`🧠 RELAY BUNDLE: ${bundleName} ($${price}) to fan ${userId} [${bundle.ids.length} items]`);
+    
+    // Track sent bundle in Redis
+    const sentKey = `chatbot:sent_bundles:${userId}`;
+    const sent = await redis.get(sentKey) || [];
+    sent.push({ bundle: bundleName, price, at: Date.now() });
+    await redis.set(sentKey, sent);
+    
+    // Cache in conversation history
+    const convKey = `chatbot:conv:${userId}`;
+    const history = await redis.get(convKey) || [];
+    history.push({ role: 'assistant', content: `${text || ''} [PPV SENT: ${bundle.name}, $${price}, ${bundle.ids.length} items]`, at: Date.now() });
+    await redis.set(convKey, history.slice(-100));
+    
+    res.json({ sent: true, bundle: bundleName, price, items: bundle.ids.length, messageId: data?.data?.id || data?.id });
+  } catch (e) {
+    console.error('❌ Relay bundle send error:', e.message);
+    res.status(500).json({ error: e.message });
+  }
+});
+
+// Get which bundles a fan has already been sent (prevents duplicates)
+app.get('/chatbot/relay/sent-bundles/:userId', async (req, res) => {
+  const { userId } = req.params;
+  const sent = await redis.get(`chatbot:sent_bundles:${userId}`) || [];
+  const bundleNames = sent.map(s => s.bundle);
+  
+  // Figure out what's available to send next
+  const available = {};
+  for (const [tier, bundles] of Object.entries(BUNDLE_TIERS)) {
+    available[tier] = bundles.filter(b => !bundleNames.includes(b));
+  }
+  
+  res.json({ userId, sent, sentBundleNames: bundleNames, available });
+});
+
 // Get cached conversation history for a fan (0 OF API credits)
 app.get('/chatbot/relay/history/:userId', async (req, res) => {
   const { userId } = req.params;
@@ -2387,6 +2451,22 @@ app.post('/webhooks/onlyfans', async (req, res) => {
       const fanId = payload?.fromUser?.id || payload?.user?.id || payload?.userId;
       const price = payload?.price || payload?.amount || 0;
       console.log(`💰 PPV PURCHASED: ${username} ← fan ${fanId} ($${price})`);
+      
+      // Track purchase in Redis
+      if (fanId) {
+        const purchaseKey = `chatbot:purchases:${fanId}`;
+        const purchases = await redis.get(purchaseKey) || [];
+        purchases.push({ price, at: Date.now(), account: username });
+        await redis.set(purchaseKey, purchases);
+        
+        // If relay mode, push purchase event to relay queue so external brain can follow up
+        const relayMode = await redis.get('chatbot:relay_mode');
+        if (relayMode && account_id === MILLIE_ACCOUNT_ID) {
+          const relayQueue = await redis.get('chatbot:relay:incoming') || [];
+          relayQueue.push({ userId: String(fanId), accountId: account_id, text: `[SYSTEM: Fan just PURCHASED PPV for $${price}. Follow up with post-purchase upsell.]`, at: Date.now(), type: 'purchase' });
+          await redis.set('chatbot:relay:incoming', relayQueue.slice(-50));
+        }
+      }
       
       if (account_id === MILLIE_ACCOUNT_ID && fanId) {
         // Chatbot model — auto follow up with upsell
