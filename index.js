@@ -1888,6 +1888,12 @@ async function processChatbotMessage(accountId, userId, messageText) {
     const relayMode = await redis.get('chatbot:relay_mode');
     if (relayMode) {
       console.log(`🧠 RELAY MODE: Fan ${userId} said: "${messageText}"`);
+      // Cache conversation in Redis (persistent history — no need to re-read from OF API)
+      const convKey = `chatbot:conv:${userId}`;
+      const history = await redis.get(convKey) || [];
+      history.push({ role: 'user', content: messageText, at: Date.now() });
+      await redis.set(convKey, history.slice(-100)); // Keep last 100 messages
+      
       // Push to relay queue — external brain polls this
       const relayQueue = await redis.get('chatbot:relay:incoming') || [];
       relayQueue.push({ userId: String(userId), accountId, text: messageText, at: Date.now() });
@@ -2107,10 +2113,39 @@ app.post('/chatbot/relay/respond', async (req, res) => {
       });
       const data = await sendRes.json();
       console.log(`🧠 RELAY RESPOND: to fan ${userId} — "${text.substring(0, 80)}"`);
+      
+      // Cache bot response in conversation history
+      const convKey = `chatbot:conv:${userId}`;
+      const history = await redis.get(convKey) || [];
+      history.push({ role: 'assistant', content: text, at: Date.now() });
+      await redis.set(convKey, history.slice(-100));
+      
       res.json({ sent: true, messageId: data?.data?.id || data?.id });
     }
   } catch (e) {
     console.error('❌ Relay respond error:', e.message);
+    res.status(500).json({ error: e.message });
+  }
+});
+
+// Get cached conversation history for a fan (0 OF API credits)
+app.get('/chatbot/relay/history/:userId', async (req, res) => {
+  const { userId } = req.params;
+  const history = await redis.get(`chatbot:conv:${userId}`) || [];
+  res.json({ userId, messages: history, count: history.length });
+});
+
+// Dump all conversations (for Google Drive export)
+app.get('/chatbot/relay/dump', async (req, res) => {
+  try {
+    const keys = await redis.keys('chatbot:conv:*');
+    const dump = {};
+    for (const key of keys) {
+      const userId = key.replace('chatbot:conv:', '');
+      dump[userId] = await redis.get(key) || [];
+    }
+    res.json({ conversations: dump, count: Object.keys(dump).length });
+  } catch (e) {
     res.status(500).json({ error: e.message });
   }
 });
