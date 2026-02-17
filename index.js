@@ -2099,11 +2099,23 @@ app.post('/chatbot/relay/respond', async (req, res) => {
     const accountId = accountMap[MILLIE_USERNAME];
     if (!accountId) return res.status(500).json({ error: 'millie account not found' });
     
-    if (ppv) {
+    if (ppv && ppv.price && ppv.vaultIds) {
       // Send PPV with media from vault
-      // TODO: implement PPV sending via relay
-      console.log(`🧠 RELAY RESPOND (PPV): to fan ${userId} — ${text} (ppv: $${ppv.price})`);
-      res.json({ sent: false, message: 'PPV relay not yet implemented' });
+      const sendRes = await fetch(`${OF_API_BASE}/${accountId}/chats/${userId}/messages`, {
+        method: 'POST',
+        headers: { 'Authorization': `Bearer ${OF_API_KEY}`, 'Content-Type': 'application/json' },
+        body: JSON.stringify({ text, price: ppv.price, mediaFiles: ppv.vaultIds })
+      });
+      const data = await sendRes.json();
+      console.log(`🧠 RELAY RESPOND (PPV $${ppv.price}): to fan ${userId} — "${text.substring(0, 80)}" [${ppv.vaultIds.length} items]`);
+      
+      // Cache in conversation history
+      const convKey = `chatbot:conv:${userId}`;
+      const history = await redis.get(convKey) || [];
+      history.push({ role: 'assistant', content: `${text} [PPV: $${ppv.price}, ${ppv.vaultIds.length} items]`, at: Date.now() });
+      await redis.set(convKey, history.slice(-100));
+      
+      res.json({ sent: true, ppv: true, price: ppv.price, items: ppv.vaultIds.length, messageId: data?.data?.id || data?.id });
     } else {
       // Send text message
       const sendRes = await fetch(`${OF_API_BASE}/${accountId}/chats/${userId}/messages`, {
