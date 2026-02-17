@@ -1859,10 +1859,10 @@ const pendingFanMessages = {}; // { userId: { messages: [], timer: null, account
 const DEBOUNCE_MS = 3000; // Wait 3s for more messages before responding
 
 // Chatbot kill switch — set to true to skip all expensive API lookups when Anthropic key is dead
-const CHATBOT_DISABLED = true;
+const CHATBOT_DISABLED = false; // Re-enabled: using relay mode to external brain (OpenClaw)
 
 function handleChatbotMessage(accountId, userId, messageText) {
-  if (CHATBOT_DISABLED) return; // Skip all processing when chatbot is disabled
+  // In relay mode, we skip Anthropic but still process messages for the relay queue
   // Quick checks before debounce
   if (!pendingFanMessages[userId]) {
     pendingFanMessages[userId] = { messages: [], timer: null, accountId };
@@ -1887,14 +1887,12 @@ async function processChatbotMessage(accountId, userId, messageText) {
     // Check relay mode first — forwards messages to external brain (e.g. OpenClaw Opus)
     const relayMode = await redis.get('chatbot:relay_mode');
     if (relayMode) {
-      const testUserId = await redis.get('chatbot:test_user_id');
-      if (!testUserId || String(userId) !== String(testUserId)) return;
       console.log(`🧠 RELAY MODE: Fan ${userId} said: "${messageText}"`);
       // Push to relay queue — external brain polls this
       const relayQueue = await redis.get('chatbot:relay:incoming') || [];
       relayQueue.push({ userId: String(userId), accountId, text: messageText, at: Date.now() });
-      // Keep only last 20
-      await redis.set('chatbot:relay:incoming', relayQueue.slice(-20));
+      // Keep only last 50
+      await redis.set('chatbot:relay:incoming', relayQueue.slice(-50));
       return;
     }
 
@@ -2083,6 +2081,38 @@ app.get('/chatbot/relay/poll', async (req, res) => {
     await redis.set('chatbot:relay:incoming', []);
   }
   res.json({ messages: queue });
+});
+
+// External brain sends response back to fan
+app.post('/chatbot/relay/respond', async (req, res) => {
+  const { userId, text, ppv } = req.body;
+  if (!userId || !text) return res.status(400).json({ error: 'userId and text required' });
+  
+  try {
+    const accountMap = await loadModelAccounts();
+    const accountId = accountMap[MILLIE_USERNAME];
+    if (!accountId) return res.status(500).json({ error: 'millie account not found' });
+    
+    if (ppv) {
+      // Send PPV with media from vault
+      // TODO: implement PPV sending via relay
+      console.log(`🧠 RELAY RESPOND (PPV): to fan ${userId} — ${text} (ppv: $${ppv.price})`);
+      res.json({ sent: false, message: 'PPV relay not yet implemented' });
+    } else {
+      // Send text message
+      const sendRes = await fetch(`${OF_API_BASE}/${accountId}/chats/${userId}/messages`, {
+        method: 'POST',
+        headers: { 'Authorization': `Bearer ${OF_API_KEY}`, 'Content-Type': 'application/json' },
+        body: JSON.stringify({ text })
+      });
+      const data = await sendRes.json();
+      console.log(`🧠 RELAY RESPOND: to fan ${userId} — "${text.substring(0, 80)}"`);
+      res.json({ sent: true, messageId: data?.data?.id || data?.id });
+    }
+  } catch (e) {
+    console.error('❌ Relay respond error:', e.message);
+    res.status(500).json({ error: e.message });
+  }
 });
 
 app.post('/chatbot/enable', async (req, res) => {
