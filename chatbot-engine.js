@@ -486,55 +486,11 @@ RULES:
 - Keep messages SHORT (1-3 sentences). Use casual texting style.
 - Vary your responses. Don't repeat phrases.
 - NEVER use restricted words (account will be suspended).
-- NEVER describe PPV contents explicitly. Keep it mysterious.`;
+- NEVER describe PPV contents explicitly. Keep it mysterious.
+- CRITICAL: Read conversation history carefully. If you see "[SYSTEM: PPV SENT" in your previous messages, that PPV was ALREADY delivered. Do NOT re-pitch the same content. If the fan responds positively about a PPV you already sent, acknowledge it and move to the NEXT content tier. If they haven't opened it yet, use an unsend threat or gentle nudge — but NEVER send the same category again.`;
 }
 
-async function callClaude(systemPrompt, conversationHistory, retryCount = 0) {
-  const messages = conversationHistory.map(m => ({ role: m.role, content: m.content }));
-
-  const startMs = Date.now();
-  const res = await fetch('https://api.anthropic.com/v1/messages', {
-    method: 'POST',
-    headers: {
-      'Content-Type': 'application/json',
-      'x-api-key': ANTHROPIC_API_KEY,
-      'anthropic-version': '2023-06-01',
-    },
-    body: JSON.stringify({
-      model: 'claude-sonnet-4-20250514',
-      max_tokens: 1024,
-      system: systemPrompt,
-      messages,
-    }),
-  });
-
-  const latencyMs = Date.now() - startMs;
-
-  if (!res.ok) {
-    const err = await res.text();
-    throw new Error(`Claude API ${res.status}: ${err}`);
-  }
-
-  const data = await res.json();
-  const text = data.content?.[0]?.text || '';
-
-  // Parse JSON response
-  try {
-    const cleaned = text.replace(/```json\n?|\n?```/g, '').trim();
-    const parsed = JSON.parse(cleaned);
-    return { parsed, latencyMs };
-  } catch {
-    try {
-      const jsonMatch = text.match(/\{[\s\S]*\}/);
-      if (jsonMatch) return { parsed: JSON.parse(jsonMatch[0]), latencyMs };
-    } catch {}
-    // Fallback
-    return {
-      parsed: { messages: [{ text: text.replace(/```json\n?|\n?```/g, '').trim(), action: 'message' }] },
-      latencyMs,
-    };
-  }
-}
+// Claude calls are now handled by OpenClaw relay — no direct API calls needed
 
 // ── Content Resolution ──────────────────────────────────────────────────────
 
@@ -660,21 +616,13 @@ async function logConversation(entry) {
   await R.ltrim('chatbot:bianca:log', 0, 4999);
 }
 
-// ── Core: Process a Fan Message ─────────────────────────────────────────────
+// ── Core: Process a Fan Message (Phase 1 — Push to Relay Queue) ─────────────
 
 async function processFanMessage(fanId, messageText) {
-  const startTime = Date.now();
-
   try {
     // Check excluded
     if (await isExcludedFan(fanId)) {
       console.log(`🚫 [bianca] Skipping excluded fan ${fanId}`);
-      return;
-    }
-
-    // Rate limit
-    if (!(await checkGlobalRateLimit())) {
-      console.log(`⏳ [bianca] Global rate limit hit, skipping fan ${fanId}`);
       return;
     }
 
@@ -688,7 +636,6 @@ async function processFanMessage(fanId, messageText) {
 
     // Mark as active conversation
     await R.sadd('chatbot:bianca:active_convos', String(fanId));
-    // Set expiry via a timestamp key
     await R.set(`chatbot:bianca:active_ts:${fanId}`, Date.now());
 
     // Load conversation history from Redis
@@ -696,109 +643,90 @@ async function processFanMessage(fanId, messageText) {
 
     // Add new message
     convHistory.push({ role: 'user', content: messageText });
+    await R.set(`chatbot:bianca:conv:${fanId}`, convHistory.slice(-50));
 
     // Check human handoff
     if (fanProfile.flags?.humanHandoff) {
       console.log(`🚩 [bianca] Fan ${fanId} is in human handoff, sending template`);
       await sendTextMessage(fanId, "heyy 💕 give me a sec, i'll get back to u soon");
       stats.messagesSent++;
-      await incrementMsgRate();
       await saveFanProfile(fanProfile);
-      await R.set(`chatbot:bianca:conv:${fanId}`, convHistory.slice(-50));
       return;
     }
 
-    // Build content menu
+    // Build content menu + system prompt (sent to relay for context)
     const contentMenu = buildContentMenu(fanProfile);
-
-    // Build system prompt
     const systemPrompt = buildSystemPrompt(fanProfile, contentMenu);
 
-    // Call Claude
-    let response, latencyMs;
-    let retries = 0;
-    while (retries <= 2) {
-      const result = await callClaude(
-        retries > 0
-          ? systemPrompt + '\n\n⚠️ Your previous response contained restricted words. Rephrase WITHOUT any restricted terms.'
-          : systemPrompt,
-        convHistory
-      );
-      response = result.parsed;
-      latencyMs = result.latencyMs;
+    // Push to relay queue — OpenClaw picks this up and generates the AI response
+    const relayEntry = {
+      fanId: String(fanId),
+      messageText,
+      systemPrompt,
+      conversationHistory: convHistory.slice(-30), // last 30 messages for context
+      fanProfile: {
+        fanId: fanProfile.fanId,
+        username: fanProfile.username,
+        buyerType: fanProfile.buyerType,
+        totalSpent: fanProfile.totalSpent,
+        purchaseCount: fanProfile.purchaseCount,
+        sentBundles: fanProfile.sentBundles,
+      },
+      enqueuedAt: Date.now(),
+    };
 
-      // Check for restricted words in all messages
-      const allTexts = (response.messages || []).map(m => m.text).join(' ');
-      const restricted = containsRestricted(allTexts);
-      if (restricted) {
-        console.warn(`⚠️ [bianca] Restricted word "${restricted}" in Claude response (retry ${retries})`);
-        retries++;
-        if (retries > 2) {
-          console.error(`❌ [bianca] Restricted word after 2 retries, skipping fan ${fanId}`);
-          await logConversation({
-            ts: new Date().toISOString(),
-            fanId,
-            direction: 'blocked',
-            fanMessage: messageText,
-            botResponse: null,
-            reason: `restricted_word: ${restricted}`,
-          });
-          await saveFanProfile(fanProfile);
-          return;
-        }
-        continue;
-      }
-      break;
+    const relayQueue = await R.get('chatbot:bianca:relay:incoming') || [];
+    relayQueue.push(relayEntry);
+    await R.set('chatbot:bianca:relay:incoming', relayQueue.slice(-50));
+
+    await saveFanProfile(fanProfile);
+    console.log(`📤 [bianca] Queued fan ${fanId} message for relay: "${messageText.substring(0, 60)}..."`);
+
+  } catch (e) {
+    stats.errors++;
+    console.error(`❌ [bianca] Error queuing fan ${fanId}:`, e.message);
+  }
+}
+
+// ── Process AI Response (Phase 2 — Execute actions from OpenClaw relay) ─────
+
+async function executeRelayResponse(fanId, response) {
+  try {
+    const fanProfile = await getFanProfile(fanId);
+    const convHistory = await R.get(`chatbot:bianca:conv:${fanId}`) || [];
+
+    // Check for restricted words
+    const allTexts = (response.messages || []).map(m => m.text).join(' ');
+    const restricted = containsRestricted(allTexts);
+    if (restricted) {
+      console.error(`🚫 [bianca] Restricted word "${restricted}" in relay response for fan ${fanId}, dropping`);
+      await logConversation({
+        ts: new Date().toISOString(), fanId, direction: 'blocked',
+        botResponse: null, reason: `restricted_word: ${restricted}`,
+      });
+      return { ok: false, reason: 'restricted_word', word: restricted };
     }
 
-    // Handle flags
+    // Handle flags (human handoff)
     if (response.flag) {
-      console.log(`🚩 [bianca] Flag from Claude for fan ${fanId}:`, response.flag);
+      console.log(`🚩 [bianca] Flag for fan ${fanId}:`, response.flag);
       fanProfile.flags.humanHandoff = true;
       fanProfile.flags.humanHandoffReason = response.flag.reason;
-      // Send a safe template response instead of Claude's message
       await sendTextMessage(fanId, "heyy 💕 give me a min, i wanna give u a proper response");
       stats.messagesSent++;
-      await incrementMsgRate();
       await saveFanProfile(fanProfile);
-      await R.set(`chatbot:bianca:conv:${fanId}`, convHistory.slice(-50));
-      await logConversation({
-        ts: new Date().toISOString(),
-        fanId,
-        direction: 'flagged',
-        fanMessage: messageText,
-        flag: response.flag,
-      });
-      return;
+      return { ok: true, flagged: true };
     }
 
-    // Normalize messages
-    const messages = response.messages || [response];
-
     // Execute messages
+    const messages = response.messages || [response];
     let ppvSentThisTurn = false;
     const botResponseParts = [];
 
     for (const msg of messages) {
       if (!msg.text && !msg.action) continue;
 
-      // Rate check
-      if (!(await checkGlobalRateLimit())) break;
-
       if (msg.action === 'ppv' && !ppvSentThisTurn) {
-        // Check PPV rate limit per fan
-        if (!(await checkFanPPVRate(fanId))) {
-          console.log(`⏳ [bianca] PPV rate limit for fan ${fanId}`);
-          // Send as text instead
-          if (msg.text) {
-            await sendTextMessage(fanId, msg.text);
-            stats.messagesSent++;
-            await incrementMsgRate();
-            botResponseParts.push({ text: msg.text, action: 'message' });
-          }
-          continue;
-        }
-
         const { categoryId, vaultItems } = await resolveContentCategory(msg.contentCategory, fanProfile);
         const price = Math.min(Math.max(msg.price || 15, 1), 100);
 
@@ -808,39 +736,30 @@ async function processFanMessage(fanId, messageText) {
             ppvSentThisTurn = true;
             stats.ppvsSent++;
             stats.ppvRevenue += price;
-            await incrementFanPPVRate(fanId);
 
-            // Update fan profile
             fanProfile.priceHistory = fanProfile.priceHistory || [];
             fanProfile.priceHistory.push({
-              offered: price,
-              opened: false, // we don't know yet
-              ts: new Date().toISOString(),
-              category: String(categoryId),
+              offered: price, opened: false,
+              ts: new Date().toISOString(), category: String(categoryId),
             });
 
-            // Update sexting progress if applicable
+            // Update sexting progress
             if (msg.contentCategory && typeof msg.contentCategory === 'string' && msg.contentCategory.startsWith('sexting')) {
               const chainMatch = msg.contentCategory.match(/^(sexting\d)/);
-              if (chainMatch) {
-                const chain = chainMatch[1];
-                if (fanProfile.sextingProgress[chain]) {
-                  fanProfile.sextingProgress[chain].currentStep++;
-                  fanProfile.sextingProgress[chain].lastStepAt = new Date().toISOString();
-                }
+              if (chainMatch && fanProfile.sextingProgress[chainMatch[1]]) {
+                fanProfile.sextingProgress[chainMatch[1]].currentStep++;
+                fanProfile.sextingProgress[chainMatch[1]].lastStepAt = new Date().toISOString();
               }
             }
 
-            // Track sent bundles
             if (categoryId && !fanProfile.sentBundles.includes(categoryId)) {
               fanProfile.sentBundles.push(categoryId);
             }
 
-            botResponseParts.push({ text: msg.text, action: 'ppv', category: categoryId, price });
+            botResponseParts.push({ text: msg.text, action: 'ppv', category: categoryId, price, itemCount: vaultItems.length });
             console.log(`💰 [bianca] PPV sent to ${fanId}: $${price} [cat ${categoryId}] ${vaultItems.length} items`);
           } catch (e) {
             console.error(`❌ [bianca] PPV send failed:`, e.message);
-            // Fallback to text
             if (msg.text) {
               await sendTextMessage(fanId, msg.text);
               botResponseParts.push({ text: msg.text, action: 'message' });
@@ -848,7 +767,6 @@ async function processFanMessage(fanId, messageText) {
             stats.errors++;
           }
         } else {
-          // No vault items, send as text
           if (msg.text) {
             await sendTextMessage(fanId, msg.text);
             botResponseParts.push({ text: msg.text, action: 'message' });
@@ -856,13 +774,11 @@ async function processFanMessage(fanId, messageText) {
           console.warn(`⚠️ [bianca] No vault items for category ${msg.contentCategory}`);
         }
       } else if (msg.action === 'ppv' && ppvSentThisTurn) {
-        // Skip additional PPVs, send text only
         if (msg.text) {
           await sendTextMessage(fanId, msg.text);
           botResponseParts.push({ text: msg.text, action: 'message (ppv_skipped)' });
         }
       } else {
-        // Regular text message
         if (msg.text) {
           await sendTextMessage(fanId, msg.text);
           botResponseParts.push({ text: msg.text, action: 'message' });
@@ -870,7 +786,6 @@ async function processFanMessage(fanId, messageText) {
       }
 
       stats.messagesSent++;
-      await incrementMsgRate();
 
       // Small delay between messages for realism
       if (messages.indexOf(msg) < messages.length - 1) {
@@ -883,7 +798,7 @@ async function processFanMessage(fanId, messageText) {
     // Update conversation history
     const assistantContent = botResponseParts.map(p => {
       if (p.action === 'ppv' || p.action?.includes('ppv')) {
-        return `${p.text || ''} [SYSTEM: PPV SENT — category=${p.category}, price=$${p.price}]`;
+        return `${p.text || ''} [SYSTEM: PPV SENT — category=${p.category}, price=$${p.price}, items=${p.itemCount || '?'}. DO NOT re-pitch this same content.]`;
       }
       return p.text;
     }).join(' ... ');
@@ -900,23 +815,20 @@ async function processFanMessage(fanId, messageText) {
 
     // Log
     await logConversation({
-      ts: new Date().toISOString(),
-      fanId,
-      direction: 'inbound',
-      fanMessage: messageText,
+      ts: new Date().toISOString(), fanId, direction: 'inbound',
       botResponse: botResponseParts,
       contentSent: botResponseParts.find(p => p.category)?.category || null,
       priceSent: botResponseParts.find(p => p.price)?.price || null,
       buyerType: fanProfile.buyerType,
-      claudeLatencyMs: latencyMs,
-      totalSpentAtTime: fanProfile.totalSpent,
     });
 
-    console.log(`✅ [bianca] Processed fan ${fanId}: ${botResponseParts.length} messages sent (${latencyMs}ms Claude)`);
+    console.log(`✅ [bianca] Executed relay response for fan ${fanId}: ${botResponseParts.length} messages sent`);
+    return { ok: true, messagesSent: botResponseParts.length };
 
   } catch (e) {
     stats.errors++;
-    console.error(`❌ [bianca] Error processing fan ${fanId}:`, e.message);
+    console.error(`❌ [bianca] Error executing relay response for fan ${fanId}:`, e.message);
+    return { ok: false, error: e.message };
   }
 }
 
@@ -1518,6 +1430,31 @@ function handleWebhookEvent(event, payload) {
 
 // ── Exports ─────────────────────────────────────────────────────────────────
 
+// ── Relay Endpoints ─────────────────────────────────────────────────────────
+
+async function relayPollHandler(req, res) {
+  const queue = await R.get('chatbot:bianca:relay:incoming') || [];
+  if (queue.length > 0) {
+    await R.set('chatbot:bianca:relay:incoming', []);
+  }
+  res.json({ messages: queue, polledAt: new Date().toISOString() });
+}
+
+async function relayRespondHandler(req, res) {
+  const { fanId, response } = req.body;
+  if (!fanId || !response) {
+    return res.status(400).json({ error: 'fanId and response required' });
+  }
+
+  try {
+    const result = await executeRelayResponse(fanId, response);
+    res.json(result);
+  } catch (e) {
+    console.error(`❌ [bianca] Relay respond error:`, e.message);
+    res.status(500).json({ ok: false, error: e.message });
+  }
+}
+
 module.exports = {
   // Lifecycle
   startChatbot,
@@ -1536,6 +1473,10 @@ module.exports = {
   logsHandler,
   excludeHandler,
   unexcludeHandler,
+
+  // Relay handlers (OpenClaw integration)
+  relayPollHandler,
+  relayRespondHandler,
 
   // Constants (for external use)
   BIANCA_ACCOUNT_ID,

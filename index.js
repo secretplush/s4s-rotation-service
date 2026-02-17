@@ -1788,6 +1788,8 @@ function selectVaultItems(catalog, bundleCategory, itemCount, fanId) {
   return selected;
 }
 
+const { queueRequest, getQueueStats } = require('./claude-queue');
+
 async function getClaudeResponse(conversationHistory, newMessage, fanContext) {
   const fanCtxStr = buildFanContextString(fanContext);
   // Inject current time in Miami (Millie's timezone)
@@ -1802,51 +1804,20 @@ async function getClaudeResponse(conversationHistory, newMessage, fanContext) {
   }
   messages.push({ role: 'user', content: newMessage });
 
-  const res = await fetch('https://api.anthropic.com/v1/messages', {
-    method: 'POST',
-    headers: {
-      'Content-Type': 'application/json',
-      'x-api-key': ANTHROPIC_API_KEY,
-      'anthropic-version': '2023-06-01',
-    },
-    body: JSON.stringify({
-      model: 'claude-opus-4-20250514',
-      max_tokens: 1024,
-      system: systemPrompt,
-      messages,
-    }),
+  // Determine priority based on fan spending
+  const priority = (fanContext?.totalSpent || 0) >= 100 ? 'high' : 'normal';
+
+  const result = await queueRequest({
+    model: 'claude-sonnet-4-20250514',
+    system: systemPrompt,
+    messages,
+    max_tokens: 1024,
+    priority,
   });
 
-  if (!res.ok) {
-    const err = await res.text();
-    throw new Error(`Claude API error ${res.status}: ${err}`);
-  }
-
-  const data = await res.json();
-  const text = data.content?.[0]?.text || '';
-
-  try {
-    // Try to parse as JSON - handle both single object and nested structures
-    const cleaned = text.replace(/```json\n?|\n?```/g, '').trim();
-    const parsed = JSON.parse(cleaned);
-    console.log(`🤖 Claude parsed JSON — action: ${parsed.action || 'multi'}, messages: ${parsed.messages?.length || 1}`);
-    return parsed;
-  } catch {
-    try {
-      // Fallback: find the outermost JSON object
-      const jsonMatch = text.match(/\{[\s\S]*\}/);
-      if (jsonMatch) {
-        const parsed = JSON.parse(jsonMatch[0]);
-        console.log(`🤖 Claude extracted JSON — action: ${parsed.action || 'multi'}, messages: ${parsed.messages?.length || 1}`);
-        return parsed;
-      }
-    } catch {}
-    
-    // Last resort: Claude didn't return JSON at all — wrap as text message
-    console.log(`🤖 Claude returned non-JSON, wrapping as text: "${text.substring(0, 80)}..."`);
-    const plainText = text.replace(/```json\n?|\n?```/g, '').replace(/^\{.*\}$/s, '').trim() || text;
-    return { text: plainText, action: 'message' };
-  }
+  const parsed = result.parsed;
+  console.log(`🤖 Claude response — action: ${parsed.action || 'multi'}, messages: ${parsed.messages?.length || 1}, cached: ${result.cached}, ${result.latencyMs}ms`);
+  return parsed;
 }
 
 async function sendChatbotMessage(accountId, userId, text) {
@@ -2064,6 +2035,10 @@ async function processChatbotMessage(accountId, userId, messageText) {
 }
 
 // === CHATBOT ENDPOINTS ===
+
+app.get('/queue-stats', (req, res) => {
+  res.json(getQueueStats());
+});
 
 app.get('/chatbot/status', async (req, res) => {
   const enabled = await redis.get('chatbot:enabled');
@@ -2439,6 +2414,10 @@ app.get('/chatbot/bianca/fans', (req, res) => biancaChatbot.fansHandler(req, res
 app.get('/chatbot/bianca/logs', (req, res) => biancaChatbot.logsHandler(req, res));
 app.post('/chatbot/bianca/exclude/:fanId', (req, res) => biancaChatbot.excludeHandler(req, res));
 app.delete('/chatbot/bianca/exclude/:fanId', (req, res) => biancaChatbot.unexcludeHandler(req, res));
+
+// Bianca relay endpoints (OpenClaw integration)
+app.get('/chatbot/bianca/relay/poll', (req, res) => biancaChatbot.relayPollHandler(req, res));
+app.post('/chatbot/bianca/relay/respond', (req, res) => biancaChatbot.relayRespondHandler(req, res));
 
 // === WEBHOOK ENDPOINT ===
 // Receives events from OnlyFans API webhooks
