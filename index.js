@@ -2,6 +2,7 @@ require('dotenv').config();
 const express = require('express');
 const cron = require('node-cron');
 const { Redis } = require('@upstash/redis');
+const chatbotBrain = require('./chatbot-brain');
 
 const app = express();
 app.use(express.json({ limit: '10mb' }));
@@ -2202,6 +2203,37 @@ app.get('/chatbot/relay/sent-bundles/:userId', async (req, res) => {
   }
   
   res.json({ userId, sent, sentBundleNames: bundleNames, available });
+});
+
+// Get full fan intelligence context (for AI brain decision-making)
+app.get('/chatbot/relay/context/:userId', async (req, res) => {
+  const { userId } = req.params;
+  const history = await redis.get(`chatbot:conv:${userId}`) || [];
+  const sentBundles = await redis.get(`chatbot:sent_bundles:${userId}`) || [];
+  const purchases = await redis.get(`chatbot:purchases:${userId}`) || [];
+  
+  const context = chatbotBrain.generateFanContext(history, sentBundles, purchases);
+  
+  // Include last 10 messages for conversation context
+  const recentMessages = history.slice(-10).map(m => ({
+    role: m.role,
+    text: m.content,
+    at: m.at
+  }));
+  
+  res.json({
+    userId,
+    ...context,
+    recentMessages,
+    availableBundles: context.nextBundle ? {
+      recommended: context.nextBundle,
+      allAvailable: Object.entries(chatbotBrain.TIER_PROGRESSION).reduce((acc, [tier, data]) => {
+        const available = data.bundles.filter(b => !sentBundles.map(s => s.bundle).includes(b));
+        if (available.length > 0) acc[tier] = { bundles: available, price: data.price };
+        return acc;
+      }, {})
+    } : null
+  });
 });
 
 // Get cached conversation history for a fan (0 OF API credits)
