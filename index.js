@@ -3,6 +3,7 @@ const express = require('express');
 const cron = require('node-cron');
 const { Redis } = require('@upstash/redis');
 const chatbotBrain = require('./chatbot-brain');
+const biancaChatbot = require('./chatbot-engine');
 
 const app = express();
 app.use(express.json({ limit: '10mb' }));
@@ -20,6 +21,9 @@ const redis = new Redis({
 
 // Chatbot config
 const ANTHROPIC_API_KEY = process.env.ANTHROPIC_API_KEY;
+
+// Initialize bianca chatbot with shared Redis client
+biancaChatbot.init(redis);
 const MILLIE_ACCOUNT_ID = 'acct_ebca85077e0a4b7da04cf14176466411';
 const MILLIE_USERNAME = 'milliexhart';
 const chatbotStats = { messagesReceived: 0, messagesSent: 0, ppvsSent: 0, errors: 0 };
@@ -2427,6 +2431,15 @@ async function runBumpCheck() {
 if (!CHATBOT_DISABLED) setInterval(runBumpCheck, 5 * 60 * 1000); // Skip bumps when chatbot is off
 console.log('🤖 Chatbot bump system active (checking every 5 min)');
 
+// === BIANCAWOODS CHATBOT ENDPOINTS ===
+app.get('/chatbot/bianca/status', (req, res) => biancaChatbot.statusHandler(req, res));
+app.post('/chatbot/bianca/start', (req, res) => biancaChatbot.startHandler(req, res));
+app.post('/chatbot/bianca/stop', (req, res) => biancaChatbot.stopHandler(req, res));
+app.get('/chatbot/bianca/fans', (req, res) => biancaChatbot.fansHandler(req, res));
+app.get('/chatbot/bianca/logs', (req, res) => biancaChatbot.logsHandler(req, res));
+app.post('/chatbot/bianca/exclude/:fanId', (req, res) => biancaChatbot.excludeHandler(req, res));
+app.delete('/chatbot/bianca/exclude/:fanId', (req, res) => biancaChatbot.unexcludeHandler(req, res));
+
 // === WEBHOOK ENDPOINT ===
 // Receives events from OnlyFans API webhooks
 // Configure webhook URL in OnlyFans API dashboard: https://<your-domain>/webhooks/onlyfans
@@ -2473,6 +2486,11 @@ app.post('/webhooks/onlyfans', async (req, res) => {
         await addActiveChatExcludeTracked(username, numericAccountId, fanId);
       }
       
+      // Biancawoods chatbot: handle messages
+      if (account_id === biancaChatbot.BIANCA_ACCOUNT_ID && fanId) {
+        biancaChatbot.handleWebhookEvent(event, { ...payload, fanId });
+      }
+
       // Chatbot: handle milliexhart messages
       if (account_id === MILLIE_ACCOUNT_ID && fanId) {
         const messageText = payload?.text || payload?.body || payload?.content || '';
@@ -3430,4 +3448,15 @@ app.listen(PORT, async () => {
   
   // Run startup recovery
   await startupRecovery();
+
+  // Auto-start biancawoods chatbot if enabled
+  if (process.env.CHATBOT_BIANCA_ENABLED === 'true') {
+    biancaChatbot.startChatbot(redis).then(result => {
+      console.log('🤖 Bianca chatbot auto-start:', result.message);
+    }).catch(e => {
+      console.error('❌ Bianca chatbot auto-start failed:', e.message);
+    });
+  } else {
+    console.log('🤖 Bianca chatbot: DISABLED (set CHATBOT_BIANCA_ENABLED=true to enable)');
+  }
 });

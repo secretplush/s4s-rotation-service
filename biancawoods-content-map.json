@@ -1,0 +1,250 @@
+{
+  "model": "biancawoods",
+  "accountId": "acct_54e3119e77da4429b6537f7dd2883a05",
+  "maxExplicitness": "topless",
+  "lastUpdated": "2026-02-17",
+  "apiNote": "OnlyFansAPI.com vault endpoint limited to 100 items max, pagination broken. Category IDs confirmed from listStates metadata. Individual vault item IDs not fully populated - need direct OF access or API fix to map all items.",
+
+  "neverSell": [25942142, 25942144, 27174580, 26278056],
+  "neverSellDetails": {
+    "mainFeedManagerOnly": { "categoryId": 25942142, "name": "🖼️ Main Feed (Manager Only)" },
+    "mainFeedUsed": { "categoryId": 25942144, "name": "🖼️ Main Feed (Used)" },
+    "mainFeedRecycled": { "categoryId": 27174580, "name": "🖼️ Main Feed (Recycled)" },
+    "doNotSellNameMentioned": { "categoryId": 26278056, "name": "❎Do Not Sell - Name Mentioned" }
+  },
+
+  "freeContent": {
+    "proofSet": {
+      "categoryId": 25942147,
+      "name": "💎 Proof Set",
+      "usage": "verification",
+      "description": "5 photos showing fingers 1,4,0,2,5 for live verification"
+    },
+    "gfeSelfies": {
+      "categoryId": 26201789,
+      "name": "💕GFE Selfies",
+      "usage": "rapport/free hook",
+      "description": "Casual selfies to build girlfriend experience rapport"
+    },
+    "cbPromotionSelfies": {
+      "categoryId": 26373605,
+      "name": "📸CB Promotion Selfies (Can be a freebie)",
+      "usage": "freebie/hook",
+      "description": "Chaturbate promotion selfies, can be given free"
+    },
+    "previewBumps": {
+      "categoryId": 26358364,
+      "name": "🎬Preview Bumps",
+      "usage": "tease/hook",
+      "description": "Short preview clips to tease paid content"
+    },
+    "rekindleVidVM": {
+      "categoryId": 26359465,
+      "name": "🫂Rekindle Vid/VM",
+      "usage": "re-engagement",
+      "description": "Videos/voice messages to re-engage dormant subscribers"
+    },
+    "promoBumps": {
+      "categoryId": 26347872,
+      "name": "🎁Promo Sale/Bumps",
+      "usage": "promotional"
+    },
+    "aiBumpVM": {
+      "categoryId": 26328606,
+      "name": "🎙️AI Bump VM (Request to SM/HM)",
+      "usage": "ai-chatbot-voice-bump"
+    },
+    "personalizedVM": {
+      "categoryId": 26825289,
+      "name": "🎙️Personalized VM",
+      "usage": "personalized-voice-message"
+    }
+  },
+
+  "sextingChains": {
+    "sexting1": {
+      "parentCategoryId": 25942139,
+      "parentName": "Sexting 1 (to implied nude)",
+      "maxExplicitness": "implied nude",
+      "steps": [
+        { "step": 0, "categoryId": 27535606, "name": "Sexting 1 pic 1 (free preview, quarter zip boobs popping out)", "type": "free", "contentType": "photo", "price": 0 },
+        { "step": 1, "categoryId": 27535609, "name": "sexting 1 vid 1", "type": "paid", "contentType": "video", "price": 15 },
+        { "step": 2, "categoryId": 27535617, "name": "sexting 1 vid 2", "type": "paid", "contentType": "video", "price": 24 },
+        { "step": 3, "categoryId": 27535620, "name": "sexting 1 vid 3", "type": "paid", "contentType": "video", "price": 38 },
+        { "step": 4, "categoryId": 27535623, "name": "sexting 1 vid 4", "type": "paid", "contentType": "video", "price": 54 },
+        { "step": 5, "categoryId": 27535625, "name": "sexting 1 vid 5", "type": "paid", "contentType": "video", "price": 75 }
+      ]
+    },
+    "sexting2": {
+      "parentCategoryId": 26057738,
+      "parentName": "Sexting 2 (to implied nude)",
+      "maxExplicitness": "implied nude",
+      "steps": [
+        { "step": 0, "categoryId": 27535650, "name": "sexting 2 pic 1 (free, glasses, quarter zip, cleavage)", "type": "free", "contentType": "photo", "price": 0 },
+        { "step": 1, "categoryId": 27535652, "name": "sexting 2 vid 1", "type": "paid", "contentType": "video", "price": 15 },
+        { "step": 2, "categoryId": 27535654, "name": "sexting 2 vid 2", "type": "paid", "contentType": "video", "price": 24 },
+        { "step": 3, "categoryId": 27535669, "name": "sexting 2 vid 3", "type": "paid", "contentType": "video", "price": 38 },
+        { "step": 4, "categoryId": 27535677, "name": "sexting 2 vid 4", "type": "paid", "contentType": "video", "price": 54 },
+        { "step": 5, "categoryId": 27535685, "name": "sexting 2 vid 5", "type": "paid", "contentType": "video", "price": 75 }
+      ]
+    },
+    "sexting3": {
+      "parentCategoryId": 26454266,
+      "parentName": "Sexting 3 (to implied nude)",
+      "maxExplicitness": "implied nude",
+      "steps": [
+        { "step": 0, "categoryId": 27535691, "name": "sexting 3 pic 1 (free) bra lots of cleavage", "type": "free", "contentType": "photo", "price": 0 },
+        { "step": 1, "categoryId": 27535694, "name": "sexting 3 vid 1", "type": "paid", "contentType": "video", "price": 15 },
+        { "step": 2, "categoryId": 27535697, "name": "sexting 3 vid 2", "type": "paid", "contentType": "video", "price": 24 },
+        { "step": 3, "categoryId": 27535698, "name": "sexting 3 vid 3", "type": "paid", "contentType": "video", "price": 38 },
+        { "step": 4, "categoryId": 27535702, "name": "sexting 3 vid 4", "type": "paid", "contentType": "video", "price": 54 },
+        { "step": 5, "categoryId": 27535705, "name": "sexting 3 vid 5", "type": "paid", "contentType": "video", "price": 75 },
+        { "step": 6, "categoryId": 27535706, "name": "sexting 3 vid 6", "type": "paid", "contentType": "video", "price": 100 }
+      ]
+    }
+  },
+
+  "bundles": [
+    { "id": 25942141, "name": "Bundle 1 - Zebra Bra", "date": "01/20", "description": "Bikini pics of boobs" },
+    { "id": 25942195, "name": "Bundle 2", "date": "01/22", "description": "Strip tease video, clothes on (MFPPV)" },
+    { "id": 25942196, "name": "Bundle 3 - Handbra", "date": "01/25", "description": "Pics only" },
+    { "id": 25942197, "name": "Bundle 4 - Leopard Kini", "date": "01/27", "description": "Bikini boob pics only (MFPPV)" },
+    { "id": 25942198, "name": "Bundle 5 - Blue Kini", "date": "01/29", "description": "Bikini boob pics only" },
+    { "id": 25942200, "name": "Bundle 6 - No Undie", "date": "01/31", "description": "Strip tease vid w clothes on" },
+    { "id": 25942786, "name": "Bundle 7 - Brown Lingerie", "date": "02/04", "description": "Pics only" },
+    { "id": 25942787, "name": "Bundle 8 - Nude Color Bra", "date": "02/06", "description": "Clothed strip tease" },
+    { "id": 25942788, "name": "Bundle 9 - Bed", "date": "11/24", "description": "Bra full body pics only" },
+    { "id": 26487836, "name": "Bundle 10 - BTS of CB Shower Live", "date": "1/5", "description": "Bikini pics" },
+    { "id": 26595441, "name": "Bundle 11 - Red Bra", "date": "2/12", "description": "Strip implied nude tit bounce" },
+    { "id": 26595443, "name": "Bundle 12 - Sheer Black", "date": "1/9", "description": "Strip implied nude tit bounce" },
+    { "id": 26595447, "name": "Bundle 13 - White Dress", "date": "1/11", "description": "Strip implied nude tit bounce" },
+    { "id": 26487834, "name": "Bundle 14 - Dress Striptease", "date": "2/14", "description": "Implied nude tit bounce" },
+    { "id": 26487852, "name": "Bundle 15 - Corset Striptease", "date": "1/14", "description": "Implied nude strip" },
+    { "id": 26524732, "name": "Bundle 16 - Jacket Striptease", "date": "1/16", "description": "Implied nude strip (MFPPV)" },
+    { "id": 26524740, "name": "Bundle 17 - Black Striptease", "date": "12/15", "description": "Implied nude strip" },
+    { "id": 26603605, "name": "Bundle 18 - Flower Striptease", "date": "12/17", "description": "Implied nude strip" },
+    { "id": 26523242, "name": "Bundle 19 - Black Lingerie", "date": "12/21", "description": "Lingerie pics and hand bra" },
+    { "id": 27055705, "name": "Bundle 20 - Beige Bra", "description": "Implied hand bra" },
+    { "id": 27082861, "name": "Bundle 21 - Pink Floral Bra", "description": "Implied nude hand bra" },
+    { "id": 27082893, "name": "Bundle 22 - Black Tease", "description": "Implied nude hand bra" },
+    { "id": 27124004, "name": "Bundle 23 - Cherry Top", "date": "02/10", "description": "Implied nude hand bra" },
+    { "id": 27124082, "name": "Bundle 24 - Black Floral", "description": "Implied nude hand bra" },
+    { "id": 27125186, "name": "Bundle 25 - Black Ribbon", "description": "Implied nude hand bra" },
+    { "id": 27165506, "name": "Bundle 26 - White Dress Shirt", "description": "Implied nude hand bra" }
+  ],
+
+  "bodyCategories": {
+    "booty": { "categoryId": 25942153, "name": "💎 Booty", "tier": "mid" },
+    "feet": { "categoryId": 25942149, "name": "💎 Feet", "tier": "mid" },
+    "impliedNudity": { "categoryId": 25942152, "name": "💎 Implied Nudity", "tier": "mid" },
+    "lingerieBikini": { "categoryId": 25942151, "name": "💎 Lingerie/Bikini", "tier": "mid" },
+    "boobs": { "categoryId": 25942155, "name": "💎 Boobs (VIPs only)", "tier": "high", "note": "Shows nipples - only for VIP spenders, work up to this" },
+    "fullyNude": { "categoryId": 25942164, "name": "💎 Fully Nude", "tier": "high" },
+    "pussy": { "categoryId": 25942162, "name": "💎 Pussy", "tier": "premium" }
+  },
+
+  "customUpsells": {
+    "tier1": {
+      "categoryId": 26023968,
+      "name": "Shower (Spliced)",
+      "fullName": "1️⃣Custom Upsell - Shower (Spliced) soapy boobs",
+      "screenshotCategoryId": 26346740,
+      "screenshotName": "Screenshots for Upsell 1 soapy boobs"
+    },
+    "tier2": {
+      "categoryId": 26058756,
+      "name": "Bedroom Boobs (Spliced)",
+      "fullName": "2️⃣Custom Upsell - Bedroom Boobs (Spliced)",
+      "screenshotCategoryId": 26346738,
+      "screenshotName": "Screenshots for Upsell 2"
+    },
+    "tier3": {
+      "categoryId": 26110169,
+      "name": "Bedroom Topless (Spliced)",
+      "fullName": "3️⃣Custom Upsell - Bedroom Topless (Spliced)",
+      "screenshotCategoryId": 26346737,
+      "screenshotName": "Screenshots for Upsell 3"
+    },
+    "tier4": {
+      "categoryId": 26249395,
+      "name": "Topless + Rubbing (Spliced)",
+      "fullName": "4️⃣Custom Upsell - Topless + Rubbing (Spliced)",
+      "screenshotCategoryId": 26346736,
+      "screenshotName": "Screenshots for Upsell 4"
+    },
+    "tier5": {
+      "categoryId": 26278094,
+      "name": "Titty Fuck (Not Dildo)",
+      "fullName": "5️⃣Custom Upsell - Titty Fuck (Not Dildo)",
+      "screenshotCategoryId": 26346735,
+      "screenshotName": "Screenshots for Upsell 5"
+    },
+    "tier6": {
+      "categoryId": 26288698,
+      "name": "Try On Diff Lingerie/Fits",
+      "fullName": "6️⃣Custom Upsell - Try On Diff Lingerie/Fits",
+      "screenshotCategoryId": 26346725,
+      "screenshotName": "Screenshots for Upsell 6"
+    },
+    "tier7": {
+      "categoryId": 26330563,
+      "name": "Topless + Rubbing + Cumming (SPLICED)",
+      "fullName": "7️⃣Custom Upsell - Topless + Rubbing + Cumming (SPLICED)",
+      "screenshotCategoryId": 26346734,
+      "screenshotName": "Screenshots for Upsell 7",
+      "note": "TOP OF LADDER - fake cumming video, most explicit content available"
+    }
+  },
+
+  "otherSellable": {
+    "bg": { "categoryId": 25942169, "name": "💵 B/G" },
+    "gg": { "categoryId": 25942170, "name": "💵 G/G" },
+    "stripping": { "categoryId": 25942166, "name": "💵 Stripping" },
+    "toyMasturbation": { "categoryId": 25942167, "name": "💵 Toy/Masturbation" },
+    "dickRating": { "categoryId": 25942168, "name": "💵 Dick Rating" },
+    "cwm": { "categoryId": 25942055, "name": "💌 CWM" },
+    "cbSelfiesSellable": { "categoryId": 26147456, "name": "📸 CB Selfies (Can be sold)" },
+    "editedSpliced": { "categoryId": 26286231, "name": "☑️Can be Sold - Edited Version (Spliced)" },
+    "blurredPreviews": { "categoryId": 26277323, "name": "💌Blurred Previews" },
+    "dickRatingVM": { "categoryId": 26538396, "name": "🍆VM Dick Ratings (Request to SM/HM)" }
+  },
+
+  "vipCustoms": {
+    "ferdyOct": { "categoryId": 26023216, "name": "🎥Custom - VIP Ferdy's Customs for Oct" },
+    "dierrezTittyFuck": { "categoryId": 26174240, "name": "🎥Custom - VIP Dierrez 10/28 | Titty Fuck" },
+    "ferdyIncorrect": { "categoryId": 26249308, "name": "🎥Custom - VIP Ferdy 11/4 | Incorrect/For Redo" },
+    "ferdyRedo": { "categoryId": 26284246, "name": "🎥Custom - VIP Ferdy 11/6 | Redo" },
+    "nicoDickRating": { "categoryId": 26543362, "name": "🎥Nico - Personalized Dick Rating" },
+    "frank": { "categoryId": 27312816, "name": "💦 Custom | Frank" }
+  },
+
+  "campaigns": {
+    "thanksgiving2025": { "categoryId": 26538389, "name": "🦃Thanksgiving 2025 - Grab A Bag" },
+    "blackFriday2025": { "categoryId": 26556278, "name": "🖤Black Friday 2025 - Video Discount" },
+    "cyberMonday2025": { "categoryId": 26562132, "name": "🤖CyberMonday 2025 - Tip Game" },
+    "christmas2025": { "categoryId": 26868735, "name": "🎄Christmas 2025 Campaign" },
+    "newYear2026": { "categoryId": 26912232, "name": "🎆New Year 2026 Campaign" }
+  },
+
+  "sfs": {
+    "avaSebade": { "categoryId": 27437785, "name": "📩 SFS - Ava Sebade @lolasinclairr" }
+  },
+
+  "pricingRules": {
+    "sextingDrip": {
+      "prices": [0, 15, 24, 38, 54, 75, 100],
+      "note": "Step 0 is free selfie. Steps 1-5 are videos at escalating prices. Step 6 (sexting 3 only) at $100."
+    },
+    "bundleDefault": 18,
+    "bodyCategory": 25,
+    "customUpsellBase": 50,
+    "tipsForOver100": true,
+    "ppvCap": 100,
+    "notes": {
+      "ppvCap": "OnlyFans PPV max is $100. For content worth more, request tips.",
+      "bundleStrategy": "Entry-level PPV to get first purchase. Low price point removes friction.",
+      "bodyEscalation": "Start with booty/feet/lingerie → implied nudity → boobs (VIP only) → fully nude → pussy",
+      "upsellStrategy": "Frame as 'just made this custom for you' - use screenshots as teasers"
+    }
+  }
+}
