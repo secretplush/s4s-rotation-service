@@ -3631,10 +3631,11 @@ app.get('/fans/:accountId/:fanId/sent', async (req, res) => {
 });
 
 // POST /fans/:accountId/:fanId/sent — log vault IDs sent to a fan
+// If isFree=true, also adds to seen (fan received free content they can view)
 app.post('/fans/:accountId/:fanId/sent', async (req, res) => {
   try {
     const { accountId, fanId } = req.params;
-    const { vaultIds } = req.body;
+    const { vaultIds, isFree } = req.body;
     if (!vaultIds || !Array.isArray(vaultIds) || vaultIds.length === 0) {
       return res.status(400).json({ error: 'vaultIds array required' });
     }
@@ -3642,8 +3643,15 @@ app.post('/fans/:accountId/:fanId/sent', async (req, res) => {
     for (const id of vaultIds) {
       await redis.sadd(key, String(id));
     }
+    // If free content, fan has actually seen it
+    if (isFree) {
+      const seenKey = `seen:${accountId}:${fanId}`;
+      for (const id of vaultIds) {
+        await redis.sadd(seenKey, String(id));
+      }
+    }
     const total = await redis.scard(key);
-    res.json({ fanId, added: vaultIds, total });
+    res.json({ fanId, added: vaultIds, total, addedToSeen: !!isFree });
   } catch (e) {
     console.error('Error adding sent vault IDs:', e);
     res.status(500).json({ error: e.message });
@@ -3663,6 +3671,7 @@ app.get('/fans/:accountId/:fanId/purchased', async (req, res) => {
 });
 
 // POST /fans/:accountId/:fanId/purchased — log vault IDs purchased by a fan
+// Also adds to seen (purchased = fan has seen the content)
 app.post('/fans/:accountId/:fanId/purchased', async (req, res) => {
   try {
     const { accountId, fanId } = req.params;
@@ -3670,14 +3679,48 @@ app.post('/fans/:accountId/:fanId/purchased', async (req, res) => {
     if (!vaultIds || !Array.isArray(vaultIds) || vaultIds.length === 0) {
       return res.status(400).json({ error: 'vaultIds array required' });
     }
-    const key = `purchased:${accountId}:${fanId}`;
+    const purchasedKey = `purchased:${accountId}:${fanId}`;
+    const seenKey = `seen:${accountId}:${fanId}`;
+    for (const id of vaultIds) {
+      await redis.sadd(purchasedKey, String(id));
+      await redis.sadd(seenKey, String(id));
+    }
+    const total = await redis.scard(purchasedKey);
+    res.json({ fanId, added: vaultIds, total, addedToSeen: true });
+  } catch (e) {
+    console.error('Error adding purchased vault IDs:', e);
+    res.status(500).json({ error: e.message });
+  }
+});
+
+// GET /fans/:accountId/:fanId/seen — vault IDs the fan has actually seen
+app.get('/fans/:accountId/:fanId/seen', async (req, res) => {
+  try {
+    const { accountId, fanId } = req.params;
+    const seenVaultIds = await redis.smembers(`seen:${accountId}:${fanId}`) || [];
+    res.json({ fanId, seenVaultIds });
+  } catch (e) {
+    console.error('Error getting seen vault IDs:', e);
+    res.status(500).json({ error: e.message });
+  }
+});
+
+// POST /fans/:accountId/:fanId/seen — manually add to seen list
+app.post('/fans/:accountId/:fanId/seen', async (req, res) => {
+  try {
+    const { accountId, fanId } = req.params;
+    const { vaultIds } = req.body;
+    if (!vaultIds || !Array.isArray(vaultIds) || vaultIds.length === 0) {
+      return res.status(400).json({ error: 'vaultIds array required' });
+    }
+    const key = `seen:${accountId}:${fanId}`;
     for (const id of vaultIds) {
       await redis.sadd(key, String(id));
     }
     const total = await redis.scard(key);
     res.json({ fanId, added: vaultIds, total });
   } catch (e) {
-    console.error('Error adding purchased vault IDs:', e);
+    console.error('Error adding seen vault IDs:', e);
     res.status(500).json({ error: e.message });
   }
 });
@@ -3687,6 +3730,7 @@ async function syncFanChatHistory(accountId, fanId) {
   const BIANCA_USER_ID = 525755724;
   let sentCount = 0;
   let purchasedCount = 0;
+  let seenCount = 0;
 
   try {
     const msgRes = await fetch(`${OF_API_BASE}/${accountId}/chats/${fanId}/messages?limit=50`, {
@@ -3694,7 +3738,7 @@ async function syncFanChatHistory(accountId, fanId) {
     });
     if (!msgRes.ok) {
       console.error(`Failed to fetch messages for fan ${fanId}: ${msgRes.status}`);
-      return { fanId, synced: 0, purchased: 0, error: `HTTP ${msgRes.status}` };
+      return { fanId, synced: 0, purchased: 0, seen: 0, error: `HTTP ${msgRes.status}` };
     }
     const data = await msgRes.json();
     const messages = data.data || data.list || data.messages || data || [];
@@ -3707,14 +3751,30 @@ async function syncFanChatHistory(accountId, fanId) {
       if (mediaFiles.length === 0) continue;
 
       const mediaIds = mediaFiles.map(m => String(m.id || m));
+      const price = msg.price || 0;
+      const isOpened = msg.isOpened || msg.is_opened || false;
+      const isFree = price === 0;
+
+      // Always add to sent (master dedup list)
       for (const id of mediaIds) {
         await redis.sadd(`sent:${accountId}:${fanId}`, id);
         sentCount++;
       }
 
+      // Determine if fan has SEEN this content:
+      // - Free content with media → fan saw it
+      // - Paid content that was opened → fan saw it
+      // - Paid content NOT opened → fan only saw blurred preview (not seen)
+      const hasSeen = (isFree && mediaFiles.length > 0) || (price > 0 && isOpened);
+
+      if (hasSeen) {
+        for (const id of mediaIds) {
+          await redis.sadd(`seen:${accountId}:${fanId}`, id);
+          seenCount++;
+        }
+      }
+
       // Check if purchased (opened + has price)
-      const price = msg.price || 0;
-      const isOpened = msg.isOpened || msg.is_opened || false;
       if (isOpened && price > 0) {
         for (const id of mediaIds) {
           await redis.sadd(`purchased:${accountId}:${fanId}`, id);
@@ -3724,10 +3784,10 @@ async function syncFanChatHistory(accountId, fanId) {
     }
   } catch (e) {
     console.error(`Error syncing fan ${fanId}:`, e.message);
-    return { fanId, synced: sentCount, purchased: purchasedCount, error: e.message };
+    return { fanId, synced: sentCount, purchased: purchasedCount, seen: seenCount, error: e.message };
   }
 
-  return { fanId, synced: sentCount, purchased: purchasedCount };
+  return { fanId, synced: sentCount, purchased: purchasedCount, seen: seenCount };
 }
 
 // POST /fans/:accountId/:fanId/sync — sync sent vault IDs from chat history
