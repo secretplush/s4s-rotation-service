@@ -22,6 +22,9 @@ const redis = new Redis({
 // Chatbot config
 const ANTHROPIC_API_KEY = process.env.ANTHROPIC_API_KEY;
 
+// Webhook stats (used by both webhook handler and stats endpoint)
+const webhookStats = { totalEvents: 0, byType: {}, lastEventAt: null };
+
 // Initialize bianca chatbot with shared Redis client
 biancaChatbot.init(redis);
 const MILLIE_ACCOUNT_ID = 'acct_ebca85077e0a4b7da04cf14176466411';
@@ -2463,6 +2466,19 @@ app.post('/webhooks/onlyfans', async (req, res) => {
       const fanId = payload?.fromUser?.id;
       if (fanId) {
         await addActiveChatExcludeTracked(username, numericAccountId, fanId);
+        
+        // Redis: track for chatbot webhook queue + bump active exclusions
+        await redis.zadd(`webhook:pending:${account_id}`, { score: Date.now(), member: String(fanId) });
+        await redis.zadd(`webhook:active:${account_id}`, { score: Date.now(), member: String(fanId) });
+        const messageText = payload?.text || payload?.body || payload?.content || '';
+        if (messageText) {
+          await redis.set(`webhook:msg:${account_id}:${fanId}`, messageText, { ex: 86400 });
+        }
+        
+        // Track webhook stats
+        webhookStats.totalEvents++;
+        webhookStats.byType[event] = (webhookStats.byType[event] || 0) + 1;
+        webhookStats.lastEventAt = new Date().toISOString();
       }
       
       // Biancawoods chatbot: handle messages
@@ -2503,6 +2519,11 @@ app.post('/webhooks/onlyfans', async (req, res) => {
         const purchases = await redis.get(purchaseKey) || [];
         purchases.push({ price, at: Date.now(), account: username });
         await redis.set(purchaseKey, purchases);
+        
+        // Redis: track for chatbot webhook queue (upsell trigger) + purchased/seen sets
+        await redis.zadd(`webhook:pending:${account_id}`, { score: Date.now(), member: String(fanId) });
+        await redis.sadd(`purchased:${account_id}:${fanId}`, `ppv_${Date.now()}`);
+        await redis.sadd(`seen:${account_id}:${fanId}`, `ppv_${Date.now()}`);
         
         // If relay mode, push purchase event to relay queue so external brain can follow up
         const relayMode = await redis.get('chatbot:relay_mode');
@@ -3433,6 +3454,18 @@ async function getBiancaBumpPhotos() {
 
 async function getActiveChatFanIds() {
   try {
+    // First try Redis webhook data (zero OF API cost)
+    const redisKey = `webhook:active:${BIANCA_ACCOUNT_ID}`;
+    const twoHoursAgo = Date.now() - 2 * 60 * 60 * 1000;
+    const activeFromRedis = await redis.zrangebyscore(redisKey, twoHoursAgo, '+inf');
+    if (activeFromRedis && activeFromRedis.length > 0) {
+      const activeIds = activeFromRedis.map(id => Number(id));
+      console.log(`💬 Bianca bump: ${activeIds.length} active fans from Redis webhooks (zero API calls)`);
+      return activeIds;
+    }
+    
+    // Fallback to OF API if no webhook data yet
+    console.log('💬 Bianca bump: no Redis webhook data, falling back to OF API');
     const res = await fetch(`${OF_API_BASE}/${BIANCA_ACCOUNT_ID}/chats?limit=50`, {
       headers: { 'Authorization': `Bearer ${OF_API_KEY}` }
     });
@@ -3442,7 +3475,6 @@ async function getActiveChatFanIds() {
     }
     const data = await res.json();
     const chats = data.data || data.list || data || [];
-    const twoHoursAgo = Date.now() - 2 * 60 * 60 * 1000;
     const activeIds = [];
     for (const chat of chats) {
       const lastMsgTime = chat.lastMessage?.createdAt || chat.updatedAt || chat.lastActivity;
@@ -3451,7 +3483,7 @@ async function getActiveChatFanIds() {
         if (fanId) activeIds.push(Number(fanId));
       }
     }
-    console.log(`💬 Bianca bump: ${activeIds.length} fans with active chats in last 2h`);
+    console.log(`💬 Bianca bump: ${activeIds.length} fans with active chats (API fallback)`);
     return activeIds;
   } catch (e) {
     console.error('❌ Bianca bump: chat fetch error:', e.message);
@@ -3834,67 +3866,9 @@ app.post('/fans/:accountId/sync-all', async (req, res) => {
 });
 
 // === WEBHOOK SYSTEM (OF API → Railway) ===
-
-const webhookStats = { totalEvents: 0, byType: {}, lastEventAt: null };
-
-// POST /webhooks/onlyfans — receives webhook events from OF API
-app.post('/webhooks/onlyfans', async (req, res) => {
-  // Respond immediately
-  res.status(200).json({ ok: true });
-
-  try {
-    const { event, payload, account_id } = req.body;
-    const accountId = account_id || req.body.accountId || 'unknown';
-
-    webhookStats.totalEvents++;
-    webhookStats.byType[event] = (webhookStats.byType[event] || 0) + 1;
-    webhookStats.lastEventAt = new Date().toISOString();
-
-    if (event === 'messages.received') {
-      const fanId = String(payload?.fromUser?.id || payload?.from_user?.id || payload?.userId || '');
-      const username = payload?.fromUser?.username || payload?.from_user?.username || payload?.fromUser?.name || 'unknown';
-      const messageText = payload?.text || payload?.message || payload?.content || '';
-      if (!fanId) return;
-
-      // Add to pending sorted set (score = timestamp)
-      await redis.zadd(`webhook:pending:${accountId}`, { score: Date.now(), member: fanId });
-      // Store message text (overwrite with latest)
-      if (messageText) {
-        await redis.set(`webhook:msg:${accountId}:${fanId}`, messageText, { ex: 86400 });
-      }
-      console.log(`📩 Webhook: message from ${username} (fan ${fanId})`);
-
-    } else if (event === 'messages.ppv.unlocked') {
-      const fanId = String(payload?.fromUser?.id || payload?.from_user?.id || payload?.userId || payload?.fanId || '');
-      const price = payload?.price || payload?.amount || 0;
-      if (!fanId) return;
-
-      // Track purchase
-      await redis.sadd(`purchased:${accountId}:${fanId}`, `ppv_${Date.now()}`);
-      await redis.sadd(`seen:${accountId}:${fanId}`, `ppv_${Date.now()}`);
-      // Add to pending for upsell
-      await redis.zadd(`webhook:pending:${accountId}`, { score: Date.now(), member: fanId });
-      console.log(`💰 Webhook: PPV unlocked by ${fanId} - $${price}`);
-
-    } else if (event === 'subscriptions.new') {
-      const fanId = String(payload?.userId || payload?.user_id || payload?.fanId || payload?.fromUser?.id || '');
-      if (!fanId) return;
-
-      await redis.sadd(`webhook:newsubs:${accountId}`, fanId);
-      console.log(`🆕 Webhook: new subscriber ${fanId}`);
-
-    } else if (event === 'transactions.new') {
-      const fanId = String(payload?.userId || payload?.user_id || payload?.fanId || '');
-      const amount = payload?.amount || payload?.price || 0;
-      console.log(`💵 Webhook: transaction $${amount} from ${fanId}`);
-
-    } else {
-      console.log(`📡 Webhook: unhandled event type '${event}'`);
-    }
-  } catch (e) {
-    console.error('❌ Webhook processing error:', e);
-  }
-});
+// NOTE: The actual POST /webhooks/onlyfans handler is registered earlier (line ~2426)
+// It handles all events and writes to Redis pending/active queues.
+// Below are the READ endpoints for the chatbot cron to consume.
 
 // GET /webhooks/pending/:accountId — list fan IDs needing responses
 app.get('/webhooks/pending/:accountId', async (req, res) => {
