@@ -3394,6 +3394,228 @@ app.get('/health', (req, res) => {
   res.json({ ok: true, timestamp: new Date().toISOString() });
 });
 
+// === BIANCA WOODS HOURLY BUMP SYSTEM ===
+
+const BIANCA_ACCOUNT_ID = 'acct_54e3119e77da4429b6537f7dd2883a05';
+const BIANCA_USER_ID = '525755724';
+const BIANCA_BUMP_EXCLUDE_IDS = [1231455148, 1232110158, 1258116798, 1232588865, 1254929574];
+
+const BIANCA_BUMP_PHOTOS_DEFAULT = ["4295115634", "4295115608", "4271207724", "4128847737", "4118094254", "4118094218", "4084333700", "4084332834", "4084332833", "4084332827", "4084332825", "4084332375", "4084332371", "4084332368", "4084332364", "4084331945", "4084331943", "4084331942", "4083927398", "4083927388", "4083927385", "4083927380", "4083927378", "4083927375"];
+
+const BIANCA_BUMP_MESSAGES = [
+  'heyyy u 💕 been thinking about u',
+  'bored and looking cute rn 😏 wanna see?',
+  'miss talking to u 🥺',
+  'just took this for u 📸',
+  'are u ignoring me 😤💕',
+  'pssst 😘',
+  'hiiii remember me? 🙈'
+];
+
+let biancaBumpState = {
+  enabled: true,
+  lastBumpTime: null,
+  lastPhotoUsed: null,
+  lastExclusions: [],
+};
+
+async function getBiancaBumpPhotos() {
+  try {
+    const photos = await redis.get('bianca:bumpPhotos');
+    if (photos && Array.isArray(photos) && photos.length > 0) return photos;
+  } catch (e) {
+    console.error('❌ Failed to load bump photos from Redis:', e.message);
+  }
+  // Initialize from default
+  await redis.set('bianca:bumpPhotos', BIANCA_BUMP_PHOTOS_DEFAULT);
+  return BIANCA_BUMP_PHOTOS_DEFAULT;
+}
+
+async function getActiveChatFanIds() {
+  try {
+    const res = await fetch(`${OF_API_BASE}/${BIANCA_ACCOUNT_ID}/chats?limit=50`, {
+      headers: { 'Authorization': `Bearer ${OF_API_KEY}` }
+    });
+    if (!res.ok) {
+      console.error('❌ Bianca bump: failed to fetch chats:', await res.text());
+      return [];
+    }
+    const data = await res.json();
+    const chats = data.data || data.list || data || [];
+    const twoHoursAgo = Date.now() - 2 * 60 * 60 * 1000;
+    const activeIds = [];
+    for (const chat of chats) {
+      const lastMsgTime = chat.lastMessage?.createdAt || chat.updatedAt || chat.lastActivity;
+      if (lastMsgTime && new Date(lastMsgTime).getTime() > twoHoursAgo) {
+        const fanId = chat.withUser?.id || chat.userId || chat.user_id;
+        if (fanId) activeIds.push(Number(fanId));
+      }
+    }
+    console.log(`💬 Bianca bump: ${activeIds.length} fans with active chats in last 2h`);
+    return activeIds;
+  } catch (e) {
+    console.error('❌ Bianca bump: chat fetch error:', e.message);
+    return [];
+  }
+}
+
+async function runBiancaBump() {
+  if (!biancaBumpState.enabled) {
+    console.log('📢 Bianca bump: disabled, skipping');
+    return;
+  }
+
+  console.log('📢 === BIANCA HOURLY BUMP ===');
+
+  try {
+    // 1. Delete previous bump
+    const prevQueueId = await redis.get('bianca:lastBumpQueueId');
+    if (prevQueueId) {
+      console.log(`📢 Deleting previous bump queue: ${prevQueueId}`);
+      try {
+        const delRes = await fetch(`${OF_API_BASE}/${BIANCA_ACCOUNT_ID}/mass-messaging/${prevQueueId}`, {
+          method: 'DELETE',
+          headers: { 'Authorization': `Bearer ${OF_API_KEY}` }
+        });
+        if (delRes.ok) {
+          console.log(`🗑️ Previous bump deleted: ${prevQueueId}`);
+        } else {
+          console.log(`⚠️ Previous bump delete returned ${delRes.status}: ${(await delRes.text()).slice(0, 100)}`);
+        }
+      } catch (e) {
+        console.error('❌ Failed to delete previous bump:', e.message);
+      }
+    }
+
+    // 2. Get active chat exclusions
+    const activeChatIds = await getActiveChatFanIds();
+    const allExcludeIds = [...BIANCA_BUMP_EXCLUDE_IDS, ...activeChatIds];
+
+    // 3. Pick random photo + message
+    const photos = await getBiancaBumpPhotos();
+    const photo = photos[Math.floor(Math.random() * photos.length)];
+    const message = BIANCA_BUMP_MESSAGES[Math.floor(Math.random() * BIANCA_BUMP_MESSAGES.length)];
+
+    // 4. Build excluded lists (SFS exclude for biancaawoods)
+    const excludedLists = [];
+    const sfsIds = sfsExcludeLists['biancaawoods'];
+    if (sfsIds) {
+      const ids = Array.isArray(sfsIds) ? sfsIds : [sfsIds];
+      for (const id of ids) excludedLists.push(Number(id));
+    }
+    const autoLists = excludeListIds['biancaawoods'] || {};
+    if (autoLists.newSub) excludedLists.push(Number(autoLists.newSub));
+    if (autoLists.activeChat) excludedLists.push(Number(autoLists.activeChat));
+
+    // 5. Send mass message
+    const body = {
+      text: message,
+      mediaFiles: [photo],
+      userLists: ['fans', 'following'],
+      ...(excludedLists.length > 0 ? { excludedLists } : {}),
+      ...(allExcludeIds.length > 0 ? { excludeUserIds: allExcludeIds } : {}),
+    };
+
+    console.log(`📢 Bianca bump: "${message}" | photo: ${photo} | excludeLists: ${excludedLists.length} | excludeUsers: ${allExcludeIds.length}`);
+
+    const res = await fetch(`${OF_API_BASE}/${BIANCA_ACCOUNT_ID}/mass-messaging`, {
+      method: 'POST',
+      headers: {
+        'Authorization': `Bearer ${OF_API_KEY}`,
+        'Content-Type': 'application/json',
+      },
+      body: JSON.stringify(body),
+    });
+
+    if (!res.ok) {
+      const err = await res.text();
+      console.error(`❌ Bianca bump send failed: ${err}`);
+      return;
+    }
+
+    const data = await res.json();
+    const queueId = data?.data?.[0]?.id || data?.id || null;
+
+    // 6. Store queue ID for next deletion
+    if (queueId) {
+      await redis.set('bianca:lastBumpQueueId', queueId);
+    }
+
+    biancaBumpState.lastBumpTime = new Date().toISOString();
+    biancaBumpState.lastPhotoUsed = photo;
+    biancaBumpState.lastExclusions = allExcludeIds;
+
+    console.log(`📢 Bianca bump sent! queue: ${queueId} | photo: ${photo} | msg: "${message}"`);
+  } catch (e) {
+    console.error('❌ Bianca bump error:', e.message);
+  }
+}
+
+// Cron: every hour at :00
+cron.schedule('0 * * * *', runBiancaBump);
+
+// Bump API endpoints
+app.get('/bump/status', (req, res) => {
+  const now = new Date();
+  const nextBump = new Date(now);
+  nextBump.setMinutes(0, 0, 0);
+  nextBump.setHours(nextBump.getHours() + 1);
+
+  res.json({
+    enabled: biancaBumpState.enabled,
+    lastBumpTime: biancaBumpState.lastBumpTime,
+    lastPhotoUsed: biancaBumpState.lastPhotoUsed,
+    nextBumpTime: nextBump.toISOString(),
+    activeChatExclusions: biancaBumpState.lastExclusions.length,
+    hardcodedExclusions: BIANCA_BUMP_EXCLUDE_IDS.length,
+  });
+});
+
+app.post('/bump/enable', (req, res) => {
+  biancaBumpState.enabled = true;
+  console.log('📢 Bianca bump: ENABLED');
+  res.json({ enabled: true, message: 'Bianca bump enabled' });
+});
+
+app.post('/bump/disable', (req, res) => {
+  biancaBumpState.enabled = false;
+  console.log('📢 Bianca bump: DISABLED');
+  res.json({ enabled: false, message: 'Bianca bump disabled' });
+});
+
+app.get('/bump/photos', async (req, res) => {
+  const photos = await getBiancaBumpPhotos();
+  res.json({ count: photos.length, photos });
+});
+
+app.post('/bump/photos', async (req, res) => {
+  const { vaultId } = req.body;
+  if (!vaultId) return res.status(400).json({ error: 'vaultId required' });
+  const photos = await getBiancaBumpPhotos();
+  if (photos.includes(String(vaultId))) return res.json({ message: 'Already exists', count: photos.length, photos });
+  photos.push(String(vaultId));
+  await redis.set('bianca:bumpPhotos', photos);
+  console.log(`📢 Bianca bump: added photo ${vaultId} (total: ${photos.length})`);
+  res.json({ added: vaultId, count: photos.length, photos });
+});
+
+app.delete('/bump/photos/:id', async (req, res) => {
+  const { id } = req.params;
+  let photos = await getBiancaBumpPhotos();
+  const before = photos.length;
+  photos = photos.filter(p => p !== id);
+  if (photos.length === before) return res.status(404).json({ error: 'Photo not found' });
+  await redis.set('bianca:bumpPhotos', photos);
+  console.log(`📢 Bianca bump: removed photo ${id} (total: ${photos.length})`);
+  res.json({ removed: id, count: photos.length, photos });
+});
+
+app.post('/bump/run', async (req, res) => {
+  console.log('📢 Manual Bianca bump trigger...');
+  await runBiancaBump();
+  res.json({ triggered: true, state: biancaBumpState });
+});
+
 // === START SERVER ===
 
 app.listen(PORT, async () => {
