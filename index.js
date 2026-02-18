@@ -3833,6 +3833,162 @@ app.post('/fans/:accountId/sync-all', async (req, res) => {
   }
 });
 
+// === WEBHOOK SYSTEM (OF API → Railway) ===
+
+const webhookStats = { totalEvents: 0, byType: {}, lastEventAt: null };
+
+// POST /webhooks/onlyfans — receives webhook events from OF API
+app.post('/webhooks/onlyfans', async (req, res) => {
+  // Respond immediately
+  res.status(200).json({ ok: true });
+
+  try {
+    const { event, payload, account_id } = req.body;
+    const accountId = account_id || req.body.accountId || 'unknown';
+
+    webhookStats.totalEvents++;
+    webhookStats.byType[event] = (webhookStats.byType[event] || 0) + 1;
+    webhookStats.lastEventAt = new Date().toISOString();
+
+    if (event === 'messages.received') {
+      const fanId = String(payload?.fromUser?.id || payload?.from_user?.id || payload?.userId || '');
+      const username = payload?.fromUser?.username || payload?.from_user?.username || payload?.fromUser?.name || 'unknown';
+      const messageText = payload?.text || payload?.message || payload?.content || '';
+      if (!fanId) return;
+
+      // Add to pending sorted set (score = timestamp)
+      await redis.zadd(`webhook:pending:${accountId}`, { score: Date.now(), member: fanId });
+      // Store message text (overwrite with latest)
+      if (messageText) {
+        await redis.set(`webhook:msg:${accountId}:${fanId}`, messageText, { ex: 86400 });
+      }
+      console.log(`📩 Webhook: message from ${username} (fan ${fanId})`);
+
+    } else if (event === 'messages.ppv.unlocked') {
+      const fanId = String(payload?.fromUser?.id || payload?.from_user?.id || payload?.userId || payload?.fanId || '');
+      const price = payload?.price || payload?.amount || 0;
+      if (!fanId) return;
+
+      // Track purchase
+      await redis.sadd(`purchased:${accountId}:${fanId}`, `ppv_${Date.now()}`);
+      await redis.sadd(`seen:${accountId}:${fanId}`, `ppv_${Date.now()}`);
+      // Add to pending for upsell
+      await redis.zadd(`webhook:pending:${accountId}`, { score: Date.now(), member: fanId });
+      console.log(`💰 Webhook: PPV unlocked by ${fanId} - $${price}`);
+
+    } else if (event === 'subscriptions.new') {
+      const fanId = String(payload?.userId || payload?.user_id || payload?.fanId || payload?.fromUser?.id || '');
+      if (!fanId) return;
+
+      await redis.sadd(`webhook:newsubs:${accountId}`, fanId);
+      console.log(`🆕 Webhook: new subscriber ${fanId}`);
+
+    } else if (event === 'transactions.new') {
+      const fanId = String(payload?.userId || payload?.user_id || payload?.fanId || '');
+      const amount = payload?.amount || payload?.price || 0;
+      console.log(`💵 Webhook: transaction $${amount} from ${fanId}`);
+
+    } else {
+      console.log(`📡 Webhook: unhandled event type '${event}'`);
+    }
+  } catch (e) {
+    console.error('❌ Webhook processing error:', e);
+  }
+});
+
+// GET /webhooks/pending/:accountId — list fan IDs needing responses
+app.get('/webhooks/pending/:accountId', async (req, res) => {
+  try {
+    const { accountId } = req.params;
+    // Get all members with scores from sorted set
+    const raw = await redis.zrange(`webhook:pending:${accountId}`, 0, -1, { withScores: true });
+
+    // raw is [member, score, member, score, ...] or [{member, score}, ...]
+    const pending = [];
+    if (Array.isArray(raw)) {
+      // Handle both formats
+      if (raw.length > 0 && typeof raw[0] === 'object' && 'member' in raw[0]) {
+        for (const item of raw) {
+          const msg = await redis.get(`webhook:msg:${accountId}:${item.member}`);
+          pending.push({ fanId: item.member, timestamp: item.score, message: msg || null });
+        }
+      } else {
+        for (let i = 0; i < raw.length; i += 2) {
+          const fanId = raw[i];
+          const timestamp = raw[i + 1];
+          const msg = await redis.get(`webhook:msg:${accountId}:${fanId}`);
+          pending.push({ fanId, timestamp, message: msg || null });
+        }
+      }
+    }
+
+    res.json({ pending });
+  } catch (e) {
+    console.error('Error getting pending webhooks:', e);
+    res.status(500).json({ error: e.message });
+  }
+});
+
+// POST /webhooks/pending/:accountId/clear — remove processed fan IDs
+app.post('/webhooks/pending/:accountId/clear', async (req, res) => {
+  try {
+    const { accountId } = req.params;
+    const { fanIds } = req.body;
+    if (!Array.isArray(fanIds) || fanIds.length === 0) {
+      return res.status(400).json({ error: 'fanIds array required' });
+    }
+
+    let removed = 0;
+    for (const fanId of fanIds) {
+      const r = await redis.zrem(`webhook:pending:${accountId}`, String(fanId));
+      if (r) removed++;
+      // Clean up stored message
+      await redis.del(`webhook:msg:${accountId}:${fanId}`);
+    }
+
+    res.json({ removed, requested: fanIds.length });
+  } catch (e) {
+    console.error('Error clearing pending webhooks:', e);
+    res.status(500).json({ error: e.message });
+  }
+});
+
+// GET /webhooks/newsubs/:accountId — new subscriber fan IDs
+app.get('/webhooks/newsubs/:accountId', async (req, res) => {
+  try {
+    const { accountId } = req.params;
+    const members = await redis.smembers(`webhook:newsubs:${accountId}`);
+    res.json({ newSubs: members || [] });
+  } catch (e) {
+    res.status(500).json({ error: e.message });
+  }
+});
+
+// POST /webhooks/newsubs/:accountId/clear — clear processed new subs
+app.post('/webhooks/newsubs/:accountId/clear', async (req, res) => {
+  try {
+    const { accountId } = req.params;
+    const { fanIds } = req.body;
+    if (Array.isArray(fanIds) && fanIds.length > 0) {
+      for (const fanId of fanIds) {
+        await redis.srem(`webhook:newsubs:${accountId}`, String(fanId));
+      }
+      res.json({ cleared: fanIds.length });
+    } else {
+      // Clear all
+      await redis.del(`webhook:newsubs:${accountId}`);
+      res.json({ cleared: 'all' });
+    }
+  } catch (e) {
+    res.status(500).json({ error: e.message });
+  }
+});
+
+// GET /webhooks/stats — webhook event counts
+app.get('/webhooks/stats', (req, res) => {
+  res.json(webhookStats);
+});
+
 // === START SERVER ===
 
 app.listen(PORT, async () => {
