@@ -490,7 +490,54 @@ RULES:
 - CRITICAL: Read conversation history carefully. If you see "[SYSTEM: PPV SENT" in your previous messages, that PPV was ALREADY delivered. Do NOT re-pitch the same content. If the fan responds positively about a PPV you already sent, acknowledge it and move to the NEXT content tier. If they haven't opened it yet, use an unsend threat or gentle nudge — but NEVER send the same category again.`;
 }
 
-// Claude calls are now handled by OpenClaw relay — no direct API calls needed
+// ── Direct Anthropic API (Opus via api03 key) ──────────────────────────────
+
+const BIANCA_ANTHROPIC_KEY = process.env.BIANCA_ANTHROPIC_KEY || process.env.ANTHROPIC_API_KEY;
+const BIANCA_MODEL = 'claude-opus-4-20250514';
+
+async function callAnthropicDirect(systemPrompt, conversationHistory, newMessage) {
+  const messages = conversationHistory.map(m => ({ role: m.role, content: m.content }));
+  messages.push({ role: 'user', content: newMessage });
+
+  const res = await fetch('https://api.anthropic.com/v1/messages', {
+    method: 'POST',
+    headers: {
+      'x-api-key': BIANCA_ANTHROPIC_KEY,
+      'anthropic-version': '2023-06-01',
+      'content-type': 'application/json',
+    },
+    body: JSON.stringify({
+      model: BIANCA_MODEL,
+      max_tokens: 1024,
+      system: [{ type: 'text', text: systemPrompt, cache_control: { type: 'ephemeral' } }],
+      messages,
+    }),
+  });
+
+  if (res.status === 429) {
+    console.error('🚫 [bianca] Anthropic 429 rate limit');
+    throw new Error('RATE_LIMIT_429');
+  }
+  if (!res.ok) {
+    const err = await res.text();
+    console.error(`🚫 [bianca] Anthropic ${res.status}: ${err}`);
+    throw new Error(`Anthropic API error: ${res.status}`);
+  }
+
+  const data = await res.json();
+  const text = data.content?.[0]?.text || '';
+  
+  // Parse JSON response
+  try {
+    // Strip markdown code fences if present
+    const cleaned = text.replace(/^```json?\s*\n?/i, '').replace(/\n?```\s*$/i, '').trim();
+    return JSON.parse(cleaned);
+  } catch (e) {
+    console.error('🚫 [bianca] Failed to parse Anthropic response as JSON:', text.substring(0, 200));
+    // Return as plain text message
+    return { messages: [{ text: text.substring(0, 300), action: 'message' }], flag: null };
+  }
+}
 
 // ── Content Resolution ──────────────────────────────────────────────────────
 
@@ -565,6 +612,13 @@ async function sendTextMessage(fanId, text) {
   return ofApi(`/chats/${fanId}/messages`, {
     method: 'POST',
     body: { text },
+  });
+}
+
+async function sendMediaMessage(fanId, text, mediaFileIds) {
+  return ofApi(`/chats/${fanId}/messages`, {
+    method: 'POST',
+    body: { text, mediaFiles: mediaFileIds },
   });
 }
 
@@ -654,33 +708,18 @@ async function processFanMessage(fanId, messageText) {
       return;
     }
 
-    // Build content menu + system prompt (sent to relay for context)
+    // Build content menu + system prompt
     const contentMenu = buildContentMenu(fanProfile);
     const systemPrompt = buildSystemPrompt(fanProfile, contentMenu);
 
-    // Push to relay queue — OpenClaw picks this up and generates the AI response
-    const relayEntry = {
-      fanId: String(fanId),
-      messageText,
-      systemPrompt,
-      conversationHistory: convHistory.slice(-30), // last 30 messages for context
-      fanProfile: {
-        fanId: fanProfile.fanId,
-        username: fanProfile.username,
-        buyerType: fanProfile.buyerType,
-        totalSpent: fanProfile.totalSpent,
-        purchaseCount: fanProfile.purchaseCount,
-        sentBundles: fanProfile.sentBundles,
-      },
-      enqueuedAt: Date.now(),
-    };
+    // Call Anthropic directly (Opus via api03 key)
+    console.log(`🧠 [bianca] Calling Anthropic for fan ${fanId}...`);
+    const aiResponse = await callAnthropicDirect(systemPrompt, convHistory.slice(-30), messageText);
+    console.log(`🧠 [bianca] Got response for fan ${fanId}: ${JSON.stringify(aiResponse).substring(0, 200)}`);
 
-    const relayQueue = await R.get('chatbot:bianca:relay:incoming') || [];
-    relayQueue.push(relayEntry);
-    await R.set('chatbot:bianca:relay:incoming', relayQueue.slice(-50));
-
-    await saveFanProfile(fanProfile);
-    console.log(`📤 [bianca] Queued fan ${fanId} message for relay: "${messageText.substring(0, 60)}..."`);
+    // Execute the response (send messages + PPVs)
+    const result = await executeRelayResponse(fanId, aiResponse);
+    console.log(`✅ [bianca] Fan ${fanId} handled: ${JSON.stringify(result).substring(0, 200)}`);
 
   } catch (e) {
     stats.errors++;
@@ -1382,7 +1421,32 @@ async function unexcludeHandler(req, res) {
 // Called from index.js when a webhook event arrives for biancawoods
 
 function handleWebhookEvent(event, payload) {
-  if (!isRunning) return;
+  // Works in both full mode and webhook-only mode
+
+  if (event === 'subscriptions.new') {
+    const fanId = String(payload?.fanId || payload?.user_id || payload?.user?.id || '');
+    if (fanId) {
+      (async () => {
+        try {
+          // Check if already welcomed
+          if (await R.sismember('chatbot:bianca:welcomed_fans', fanId)) return;
+          if (await isExcludedFan(fanId)) { await R.sadd('chatbot:bianca:welcomed_fans', fanId); return; }
+
+          // Send welcome with GFE selfie
+          const GFE_SELFIES = ["4129214996", "4129214993", "4118094231", "4118094226", "4113019829", "4113019824", "4113019823", "4113019822", "4113019819", "4112955857", "4112955856"];
+          const selfie = GFE_SELFIES[Math.floor(Math.random() * GFE_SELFIES.length)];
+          const welcomeText = WELCOME_TEMPLATES[Math.floor(Math.random() * WELCOME_TEMPLATES.length)];
+          
+          await sendMediaMessage(fanId, welcomeText, [selfie]);
+          await R.sadd('chatbot:bianca:welcomed_fans', fanId);
+          stats.welcomesSent++;
+          console.log(`👋 [bianca] Welcomed new sub ${fanId} with selfie`);
+        } catch (e) {
+          console.error(`❌ [bianca] Welcome error for ${fanId}:`, e.message);
+        }
+      })();
+    }
+  }
 
   if (event === 'messages.received') {
     const fanId = payload?.fromUser?.id;

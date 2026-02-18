@@ -2542,8 +2542,10 @@ app.post('/webhooks/onlyfans', async (req, res) => {
       const fanId = payload?.user_id || payload?.user?.id;
       if (fanId) {
         await addNewSubExcludeTracked(username, numericAccountId, fanId);
-        // Wake OpenClaw agent to send personal welcome
-        await wakeOpenClawAgent('new_subscriber', { accountId: account_id, fanId });
+        // Welcome new subscriber directly (no OpenClaw needed)
+        if (account_id === 'acct_54e3119e77da4429b6537f7dd2883a05') {
+          biancaChatbot.handleWebhookEvent('subscriptions.new', { fanId, user_id: fanId });
+        }
       }
     }
 
@@ -2568,8 +2570,7 @@ app.post('/webhooks/onlyfans', async (req, res) => {
         webhookStats.byType[event] = (webhookStats.byType[event] || 0) + 1;
         webhookStats.lastEventAt = new Date().toISOString();
         
-        // Wake OpenClaw agent via /hooks/agent (event-driven, no polling crons)
-        await wakeOpenClawAgent('fan_message', { accountId: account_id, fanId });
+        // Fan messages handled directly by chatbot-engine (Anthropic API) — no OpenClaw needed
       }
       
       // Biancawoods chatbot: handle messages
@@ -2616,8 +2617,7 @@ app.post('/webhooks/onlyfans', async (req, res) => {
         await redis.sadd(`purchased:${account_id}:${fanId}`, `ppv_${Date.now()}`);
         await redis.sadd(`seen:${account_id}:${fanId}`, `ppv_${Date.now()}`);
         
-        // Wake OpenClaw agent for upsell opportunity
-        await wakeOpenClawAgent('ppv_purchase', { accountId: account_id, fanId });
+        // PPV purchases handled directly by chatbot-engine — no OpenClaw needed
         
         // If relay mode, push purchase event to relay queue so external brain can follow up
         const relayMode = await redis.get('chatbot:relay_mode');
