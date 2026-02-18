@@ -3766,7 +3766,7 @@ app.post('/fans/:accountId/sync-all', async (req, res) => {
     }
 
     const totalSynced = fans.reduce((sum, f) => sum + f.synced, 0);
-    res.json({ synced: totalSynced, fans });
+    res.json({ synced: totalSynced, fansProcessed: fans.length, chatsFound: chats.length, fans });
   } catch (e) {
     console.error('Error syncing all fans:', e);
     res.status(500).json({ error: e.message });
