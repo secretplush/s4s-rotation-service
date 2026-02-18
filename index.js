@@ -4044,8 +4044,8 @@ app.listen(PORT, async () => {
   await loadExcludeListIds();
   await ensureAllExcludeLists();
   
-  // Run startup recovery
-  await startupRecovery();
+  // Run startup recovery (non-blocking so health check passes)
+  startupRecovery().catch(e => console.error('❌ Startup recovery error:', e.message));
 
   // Auto-start biancawoods chatbot if enabled
   if (process.env.CHATBOT_BIANCA_ENABLED === 'true') {
