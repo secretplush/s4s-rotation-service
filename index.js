@@ -25,6 +25,96 @@ const ANTHROPIC_API_KEY = process.env.ANTHROPIC_API_KEY;
 // Webhook stats (used by both webhook handler and stats endpoint)
 const webhookStats = { totalEvents: 0, byType: {}, lastEventAt: null };
 
+// OpenClaw agent webhook — event-driven chatbot (no polling crons)
+const BIANCA_ACCOUNT_ID_CONST = 'acct_54e3119e77da4429b6537f7dd2883a05';
+async function wakeOpenClawAgent(eventType, context) {
+  try {
+    if (context.accountId !== BIANCA_ACCOUNT_ID_CONST) return;
+    const tunnelUrl = await redis.get('openclaw:tunnel_url');
+    const hookToken = await redis.get('openclaw:hook_token');
+    if (!tunnelUrl || !hookToken) return;
+
+    // Debounce: only wake if last wake was >30s ago
+    const lastWake = await redis.get('openclaw:last_wake') || 0;
+    if (Date.now() - Number(lastWake) < 30000) return;
+    await redis.set('openclaw:last_wake', Date.now());
+
+    let message;
+    if (eventType === 'new_subscriber') {
+      message = `New subscriber on Bianca: fan ${context.fanId}
+
+You are Bianca Woods. A new fan just subscribed. Send them a warm, personal welcome with a free GFE selfie.
+
+API base: https://app.onlyfansapi.com/api/${BIANCA_ACCOUNT_ID_CONST}
+Auth: Authorization: Bearer ${OF_API_KEY}
+
+Read research/bianca-agent-prompt.md for your persona and all vault IDs.
+
+GFE Selfies (pick ONE randomly): ["4129214996", "4129214993", "4118094231", "4118094226", "4113019829", "4113019824", "4113019823", "4113019822", "4113019819", "4112955857", "4112955856"]
+
+Send a casual opener with the selfie:
+POST {base}/chats/${context.fanId}/messages — body: {"text": "your message", "mediaFiles": ["selfie_id"]}
+
+Messages (pick one, vary):
+- "heyyy 🥰 just saw u subbed, what made u check me out?"
+- "hiii 💕 glad ur here… tell me something about urself"
+- "omg new face 🙈 hi babe whats ur name?"
+- "heyyy cutie 😏 so what are u into?"
+
+EXCLUDE fan IDs: 483664969, 482383508. Usernames: nij444, tylerd34.
+If this fan is excluded, do nothing.`;
+    } else {
+      // Fan message or purchase — process pending fans
+      message = `Process pending Bianca fans. Event: ${eventType}
+
+Bianca's user ID: 525755724
+API base: https://app.onlyfansapi.com/api/${BIANCA_ACCOUNT_ID_CONST}
+Auth header: Authorization: Bearer ${OF_API_KEY}
+Railway base: https://s4s-worker-production.up.railway.app
+Account ID: ${BIANCA_ACCOUNT_ID_CONST}
+
+Check pending: curl -s https://s4s-worker-production.up.railway.app/webhooks/pending/${BIANCA_ACCOUNT_ID_CONST}
+
+Read research/bianca-agent-prompt.md for your persona, vault catalog, and all content IDs.
+Read research/chatbot-brain-v3.md for sales tactics.
+Read research/bianca-fan-state.json for fan history.
+Read research/bianca-dispatch-lock.json for dedup — skip fans processed <90s ago.
+
+⚠️ RATE LIMIT HANDLER: If ANY API call returns HTTP 429, IMMEDIATELY:
+1. Write {"timestamp": <current unix ms>, "reason": "429"} to research/bianca-rate-limit.json
+2. STOP all processing — do not retry, do not continue
+3. Report what happened
+
+For each fan (max 5):
+1. GET {API base}/chats/{fanId}/messages?limit=15
+2. Check Redis for sent content: GET {Railway base}/fans/{accountId}/{fanId}/sent
+3. Generate response AS Bianca
+4. Send via POST {API base}/chats/{fanId}/messages
+5. Log sent PPVs to Redis: POST {Railway base}/fans/{accountId}/{fanId}/sent
+6. Update research/bianca-fan-state.json
+7. Clear responded fans: POST {Railway base}/webhooks/pending/{accountId}/clear with {fanIds: [...]}
+
+EXCLUDE: IDs 483664969, 482383508. Usernames: nij444, tylerd34.
+UNDERAGE: If fan claims under 18, send 'heyy give me a sec' and STOP.
+Max 1 PPV per fan per response. PPV cap $100. Check Redis BEFORE every PPV.
+NEVER call /media/vault — all vault IDs are in bianca-agent-prompt.md.
+Momentum: ONE mention of old unopened PPV max, then send NEW content.`;
+    }
+
+    fetch(`${tunnelUrl}/hooks/agent`, {
+      method: 'POST',
+      headers: { 'Authorization': `Bearer ${hookToken}`, 'Content-Type': 'application/json' },
+      body: JSON.stringify({
+        message,
+        sessionKey: `hook:bianca-${eventType}`,
+        model: 'anthropic/claude-opus-4-6',
+        deliver: false,
+        timeoutSeconds: 120
+      })
+    }).catch(e => console.log('⚠️ OpenClaw agent wake failed:', e.message));
+  } catch (e) { /* silent */ }
+}
+
 // Initialize bianca chatbot with shared Redis client
 biancaChatbot.init(redis);
 const MILLIE_ACCOUNT_ID = 'acct_ebca85077e0a4b7da04cf14176466411';
@@ -2445,6 +2535,8 @@ app.post('/webhooks/onlyfans', async (req, res) => {
       const fanId = payload?.user_id || payload?.user?.id;
       if (fanId) {
         await addNewSubExcludeTracked(username, numericAccountId, fanId);
+        // Wake OpenClaw agent to send personal welcome
+        await wakeOpenClawAgent('new_subscriber', { accountId: account_id, fanId });
       }
     }
 
@@ -2469,26 +2561,8 @@ app.post('/webhooks/onlyfans', async (req, res) => {
         webhookStats.byType[event] = (webhookStats.byType[event] || 0) + 1;
         webhookStats.lastEventAt = new Date().toISOString();
         
-        // Wake OpenClaw chatbot via webhook (event-driven, no polling needed)
-        try {
-          // Only wake OpenClaw for accounts with active chatbots
-          if (account_id === 'acct_54e3119e77da4429b6537f7dd2883a05') {
-            const tunnelUrl = await redis.get('openclaw:tunnel_url');
-            const hookToken = await redis.get('openclaw:hook_token');
-            if (tunnelUrl && hookToken) {
-              // Debounce: only wake if last wake was >30s ago
-              const lastWake = await redis.get('openclaw:last_wake') || 0;
-              if (Date.now() - Number(lastWake) > 30000) {
-                await redis.set('openclaw:last_wake', Date.now());
-                fetch(`${tunnelUrl}/hooks/wake`, {
-                  method: 'POST',
-                  headers: { 'Authorization': `Bearer ${hookToken}`, 'Content-Type': 'application/json' },
-                  body: JSON.stringify({ text: `Fan message from ${fanId} on ${account_id}`, mode: 'now' })
-                }).catch(e => console.log('⚠️ OpenClaw wake failed:', e.message));
-              }
-            }
-          }
-        } catch (e) { /* silent */ }
+        // Wake OpenClaw agent via /hooks/agent (event-driven, no polling crons)
+        await wakeOpenClawAgent('fan_message', { accountId: account_id, fanId });
       }
       
       // Biancawoods chatbot: handle messages
@@ -2535,25 +2609,8 @@ app.post('/webhooks/onlyfans', async (req, res) => {
         await redis.sadd(`purchased:${account_id}:${fanId}`, `ppv_${Date.now()}`);
         await redis.sadd(`seen:${account_id}:${fanId}`, `ppv_${Date.now()}`);
         
-        // Wake OpenClaw for upsell opportunity
-        try {
-          // Only wake OpenClaw for accounts with active chatbots
-          if (account_id === 'acct_54e3119e77da4429b6537f7dd2883a05') {
-            const tunnelUrl = await redis.get('openclaw:tunnel_url');
-            const hookToken = await redis.get('openclaw:hook_token');
-            if (tunnelUrl && hookToken) {
-              const lastWake = await redis.get('openclaw:last_wake') || 0;
-              if (Date.now() - Number(lastWake) > 30000) {
-                await redis.set('openclaw:last_wake', Date.now());
-                fetch(`${tunnelUrl}/hooks/wake`, {
-                  method: 'POST',
-                  headers: { 'Authorization': `Bearer ${hookToken}`, 'Content-Type': 'application/json' },
-                  body: JSON.stringify({ text: `PPV purchased by ${fanId} ($${price}) on ${account_id} - upsell opportunity`, mode: 'now' })
-                }).catch(e => console.log('⚠️ OpenClaw wake failed:', e.message));
-              }
-            }
-          }
-        } catch (e) { /* silent */ }
+        // Wake OpenClaw agent for upsell opportunity
+        await wakeOpenClawAgent('ppv_purchase', { accountId: account_id, fanId });
         
         // If relay mode, push purchase event to relay queue so external brain can follow up
         const relayMode = await redis.get('chatbot:relay_mode');
