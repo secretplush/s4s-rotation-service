@@ -3616,6 +3616,163 @@ app.post('/bump/run', async (req, res) => {
   res.json({ triggered: true, state: biancaBumpState });
 });
 
+// === VAULT ID TRACKING (prevent duplicate PPV sends) ===
+
+// GET /fans/:accountId/:fanId/sent — all vault IDs ever sent to this fan
+app.get('/fans/:accountId/:fanId/sent', async (req, res) => {
+  try {
+    const { accountId, fanId } = req.params;
+    const sentVaultIds = await redis.smembers(`sent:${accountId}:${fanId}`) || [];
+    res.json({ fanId, sentVaultIds });
+  } catch (e) {
+    console.error('Error getting sent vault IDs:', e);
+    res.status(500).json({ error: e.message });
+  }
+});
+
+// POST /fans/:accountId/:fanId/sent — log vault IDs sent to a fan
+app.post('/fans/:accountId/:fanId/sent', async (req, res) => {
+  try {
+    const { accountId, fanId } = req.params;
+    const { vaultIds } = req.body;
+    if (!vaultIds || !Array.isArray(vaultIds) || vaultIds.length === 0) {
+      return res.status(400).json({ error: 'vaultIds array required' });
+    }
+    const key = `sent:${accountId}:${fanId}`;
+    for (const id of vaultIds) {
+      await redis.sadd(key, String(id));
+    }
+    const total = await redis.scard(key);
+    res.json({ fanId, added: vaultIds, total });
+  } catch (e) {
+    console.error('Error adding sent vault IDs:', e);
+    res.status(500).json({ error: e.message });
+  }
+});
+
+// GET /fans/:accountId/:fanId/purchased — all vault IDs purchased by this fan
+app.get('/fans/:accountId/:fanId/purchased', async (req, res) => {
+  try {
+    const { accountId, fanId } = req.params;
+    const purchasedVaultIds = await redis.smembers(`purchased:${accountId}:${fanId}`) || [];
+    res.json({ fanId, purchasedVaultIds });
+  } catch (e) {
+    console.error('Error getting purchased vault IDs:', e);
+    res.status(500).json({ error: e.message });
+  }
+});
+
+// POST /fans/:accountId/:fanId/purchased — log vault IDs purchased by a fan
+app.post('/fans/:accountId/:fanId/purchased', async (req, res) => {
+  try {
+    const { accountId, fanId } = req.params;
+    const { vaultIds } = req.body;
+    if (!vaultIds || !Array.isArray(vaultIds) || vaultIds.length === 0) {
+      return res.status(400).json({ error: 'vaultIds array required' });
+    }
+    const key = `purchased:${accountId}:${fanId}`;
+    for (const id of vaultIds) {
+      await redis.sadd(key, String(id));
+    }
+    const total = await redis.scard(key);
+    res.json({ fanId, added: vaultIds, total });
+  } catch (e) {
+    console.error('Error adding purchased vault IDs:', e);
+    res.status(500).json({ error: e.message });
+  }
+});
+
+// Shared sync logic for a single fan
+async function syncFanChatHistory(accountId, fanId) {
+  const BIANCA_USER_ID = 525755724;
+  let sentCount = 0;
+  let purchasedCount = 0;
+
+  try {
+    const msgRes = await fetch(`${OF_API_BASE}/${accountId}/chats/${fanId}/messages?limit=50`, {
+      headers: { 'Authorization': `Bearer ${OF_API_KEY}` }
+    });
+    if (!msgRes.ok) {
+      console.error(`Failed to fetch messages for fan ${fanId}: ${msgRes.status}`);
+      return { fanId, synced: 0, purchased: 0, error: `HTTP ${msgRes.status}` };
+    }
+    const data = await msgRes.json();
+    const messages = data.list || data.messages || data.data || data || [];
+
+    for (const msg of messages) {
+      const fromId = msg.fromUser?.id || msg.from_user?.id;
+      if (fromId !== BIANCA_USER_ID) continue;
+
+      const mediaFiles = msg.mediaFiles || msg.media_files || msg.media || [];
+      if (mediaFiles.length === 0) continue;
+
+      const mediaIds = mediaFiles.map(m => String(m.id || m));
+      for (const id of mediaIds) {
+        await redis.sadd(`sent:${accountId}:${fanId}`, id);
+        sentCount++;
+      }
+
+      // Check if purchased (opened + has price)
+      const price = msg.price || 0;
+      const isOpened = msg.isOpened || msg.is_opened || false;
+      if (isOpened && price > 0) {
+        for (const id of mediaIds) {
+          await redis.sadd(`purchased:${accountId}:${fanId}`, id);
+          purchasedCount++;
+        }
+      }
+    }
+  } catch (e) {
+    console.error(`Error syncing fan ${fanId}:`, e.message);
+    return { fanId, synced: sentCount, purchased: purchasedCount, error: e.message };
+  }
+
+  return { fanId, synced: sentCount, purchased: purchasedCount };
+}
+
+// POST /fans/:accountId/:fanId/sync — sync sent vault IDs from chat history
+app.post('/fans/:accountId/:fanId/sync', async (req, res) => {
+  try {
+    const { accountId, fanId } = req.params;
+    const result = await syncFanChatHistory(accountId, fanId);
+    res.json(result);
+  } catch (e) {
+    console.error('Error syncing fan:', e);
+    res.status(500).json({ error: e.message });
+  }
+});
+
+// POST /fans/:accountId/sync-all — sync ALL active fans
+app.post('/fans/:accountId/sync-all', async (req, res) => {
+  try {
+    const { accountId } = req.params;
+    const chatsRes = await fetch(`${OF_API_BASE}/${accountId}/chats?limit=50`, {
+      headers: { 'Authorization': `Bearer ${OF_API_KEY}` }
+    });
+    if (!chatsRes.ok) {
+      return res.status(500).json({ error: `Failed to fetch chats: HTTP ${chatsRes.status}` });
+    }
+    const chatsData = await chatsRes.json();
+    const chats = chatsData.list || chatsData.chats || chatsData.data || chatsData || [];
+
+    const fans = [];
+    for (const chat of chats) {
+      const fanId = chat.withUser?.id || chat.with_user?.id || chat.userId || chat.user_id || chat.id;
+      if (!fanId) continue;
+      const result = await syncFanChatHistory(accountId, String(fanId));
+      fans.push(result);
+      // Rate limit
+      await new Promise(r => setTimeout(r, 500));
+    }
+
+    const totalSynced = fans.reduce((sum, f) => sum + f.synced, 0);
+    res.json({ synced: totalSynced, fans });
+  } catch (e) {
+    console.error('Error syncing all fans:', e);
+    res.status(500).json({ error: e.message });
+  }
+});
+
 // === START SERVER ===
 
 app.listen(PORT, async () => {
