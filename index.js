@@ -3697,13 +3697,13 @@ async function syncFanChatHistory(accountId, fanId) {
       return { fanId, synced: 0, purchased: 0, error: `HTTP ${msgRes.status}` };
     }
     const data = await msgRes.json();
-    const messages = data.list || data.messages || data.data || data || [];
+    const messages = data.data || data.list || data.messages || data || [];
 
     for (const msg of messages) {
       const fromId = msg.fromUser?.id || msg.from_user?.id;
       if (fromId !== BIANCA_USER_ID) continue;
 
-      const mediaFiles = msg.mediaFiles || msg.media_files || msg.media || [];
+      const mediaFiles = msg.media || msg.mediaFiles || msg.media_files || [];
       if (mediaFiles.length === 0) continue;
 
       const mediaIds = mediaFiles.map(m => String(m.id || m));
@@ -3753,11 +3753,11 @@ app.post('/fans/:accountId/sync-all', async (req, res) => {
       return res.status(500).json({ error: `Failed to fetch chats: HTTP ${chatsRes.status}` });
     }
     const chatsData = await chatsRes.json();
-    const chats = chatsData.list || chatsData.chats || chatsData.data || chatsData || [];
+    const chats = chatsData.data || chatsData.list || chatsData.chats || chatsData || [];
 
     const fans = [];
     for (const chat of chats) {
-      const fanId = chat.withUser?.id || chat.with_user?.id || chat.userId || chat.user_id || chat.id;
+      const fanId = chat.fan?.id || chat.withUser?.id || chat.with_user?.id || chat.userId || chat.user_id || chat.id;
       if (!fanId) continue;
       const result = await syncFanChatHistory(accountId, String(fanId));
       fans.push(result);
