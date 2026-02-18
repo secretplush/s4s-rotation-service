@@ -42,7 +42,7 @@ async function wakeOpenClawAgent(eventType, context) {
     // Current date/time for agent context
     const now = new Date();
     const days = ['Sunday','Monday','Tuesday','Wednesday','Thursday','Friday','Saturday'];
-    const dateStr = `${days[now.getUTCDay() === 0 ? 0 : now.getUTCDay()]} ${now.toLocaleString('en-US', { timeZone: 'America/Puerto_Rico', dateStyle: 'full', timeStyle: 'short' })}`;
+    const dateStr = `${now.toLocaleString('en-US', { timeZone: 'America/New_York', weekday: 'long' })}, ${now.toLocaleString('en-US', { timeZone: 'America/New_York', dateStyle: 'full', timeStyle: 'short' })}`;
 
     let message;
     if (eventType === 'new_subscriber') {
