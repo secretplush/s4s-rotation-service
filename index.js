@@ -39,9 +39,15 @@ async function wakeOpenClawAgent(eventType, context) {
     if (Date.now() - Number(lastWake) < 30000) return;
     await redis.set('openclaw:last_wake', Date.now());
 
+    // Current date/time for agent context
+    const now = new Date();
+    const days = ['Sunday','Monday','Tuesday','Wednesday','Thursday','Friday','Saturday'];
+    const dateStr = `${days[now.getUTCDay() === 0 ? 0 : now.getUTCDay()]} ${now.toLocaleString('en-US', { timeZone: 'America/Puerto_Rico', dateStyle: 'full', timeStyle: 'short' })}`;
+
     let message;
     if (eventType === 'new_subscriber') {
       message = `New subscriber on Bianca: fan ${context.fanId}
+Current date/time: ${dateStr} (AST)
 
 You are Bianca Woods. A new fan just subscribed. Send them a warm, personal welcome with a free GFE selfie.
 
@@ -66,6 +72,7 @@ If this fan is excluded, do nothing.`;
     } else {
       // Fan message or purchase — process pending fans
       message = `Process pending Bianca fans. Event: ${eventType}
+Current date/time: ${dateStr} (AST)
 
 Bianca's user ID: 525755724
 API base: https://app.onlyfansapi.com/api/${BIANCA_ACCOUNT_ID_CONST}
