@@ -4109,4 +4109,99 @@ app.listen(PORT, async () => {
   } else {
     console.log('🤖 Bianca chatbot: DISABLED (set CHATBOT_BIANCA_ENABLED=true to enable)');
   }
+
+  // ── Bianca Bump Loop (standalone, no AI) ──────────────────────────────────
+  // Sends a free mass message every hour with a random bump photo + caption.
+  // Deletes the previous bump before sending a new one. Pure automation.
+  const BIANCA_BUMP_PHOTOS = [
+    "4295115634", "4295115608", "4271207724", "4128847737", "4118094254",
+    "4118094218", "4084333700", "4084332834", "4084332833", "4084332827",
+    "4084332825", "4084332375", "4084332371", "4084332368", "4084332364",
+    "4084331945", "4084331943", "4084331942", "4083927398", "4083927388",
+    "4083927385", "4083927380", "4083927378", "4083927375"
+  ];
+  const BIANCA_BUMP_CAPTIONS = [
+    'heyyy u 💕 been thinking about u',
+    'bored and looking cute rn 😏 wanna see?',
+    'miss talking to u 🥺',
+    'just took this for u 📸',
+    'are u ignoring me 😤💕',
+    'pssst 😘',
+    'hiiii remember me? 🙈',
+    'heyy how are u 😊',
+    'hey babe what are u up to rn',
+    'hiii 💕',
+    'heyyy whatcha doing 😊',
+    'hey handsome 😏',
+    'bored rn... entertain me? 😊',
+    'heyy stranger 💕',
+    'thinking about u rn 😊',
+    'hey cutie wyd 💕',
+  ];
+  const BIANCA_BUMP_ACCOUNT = 'acct_54e3119e77da4429b6537f7dd2883a05';
+  const BIANCA_BUMP_EXCLUDE_LISTS = [1231455148, 1232110158, 1258116798, 1232588865, 1254929574];
+
+  async function runBiancaBump() {
+    try {
+      console.log('📢 [bianca-bump] Running hourly bump...');
+      const bumpState = await redis.get('bianca:bump_state') || {
+        lastMessageId: null, recentCaptions: [], totalSent: 0
+      };
+
+      // Delete previous bump message
+      if (bumpState.lastMessageId) {
+        try {
+          const delRes = await fetch(`${OF_API_BASE}/${BIANCA_BUMP_ACCOUNT}/mass-messages/${bumpState.lastMessageId}`, {
+            method: 'DELETE',
+            headers: { 'Authorization': `Bearer ${OF_API_KEY}` }
+          });
+          console.log(`🗑️ [bianca-bump] Deleted previous bump ${bumpState.lastMessageId}: ${delRes.status}`);
+        } catch (e) {
+          console.log(`⚠️ [bianca-bump] Could not delete previous bump: ${e.message}`);
+        }
+      }
+
+      // Pick random photo + caption (avoid recent captions)
+      const photo = BIANCA_BUMP_PHOTOS[Math.floor(Math.random() * BIANCA_BUMP_PHOTOS.length)];
+      const recentSet = new Set(bumpState.recentCaptions || []);
+      const availCaptions = BIANCA_BUMP_CAPTIONS.filter(c => !recentSet.has(c));
+      const pool = availCaptions.length > 0 ? availCaptions : BIANCA_BUMP_CAPTIONS;
+      const caption = pool[Math.floor(Math.random() * pool.length)];
+
+      // Get active chat fan IDs to exclude (fans chatting with bot in last 2 hours)
+      const activeMembers = await redis.zrangebyscore(`webhook:active:${BIANCA_BUMP_ACCOUNT}`, Date.now() - 2 * 3600000, '+inf');
+      const excludeUserIds = (activeMembers || []).map(Number).filter(n => !isNaN(n));
+
+      // Send free mass message
+      const sendRes = await fetch(`${OF_API_BASE}/${BIANCA_BUMP_ACCOUNT}/mass-messages`, {
+        method: 'POST',
+        headers: { 'Authorization': `Bearer ${OF_API_KEY}`, 'Content-Type': 'application/json' },
+        body: JSON.stringify({
+          text: caption,
+          mediaFiles: [photo],
+          excludeListIds: BIANCA_BUMP_EXCLUDE_LISTS,
+          excludeUserIds: [...new Set(excludeUserIds)]
+        })
+      });
+      const sendData = await sendRes.json();
+      const messageId = sendData?.data?.id || sendData?.id || sendData?.data?.[0]?.id || null;
+
+      // Save state
+      await redis.set('bianca:bump_state', {
+        lastMessageId: messageId,
+        lastBumpAt: new Date().toISOString(),
+        lastCaption: caption,
+        recentCaptions: [caption, ...(bumpState.recentCaptions || [])].slice(0, 4),
+        totalSent: (bumpState.totalSent || 0) + 1
+      });
+
+      console.log(`📢 [bianca-bump] Sent: "${caption}" (msg ${messageId}, excluded ${excludeUserIds.length} active fans)`);
+    } catch (e) {
+      console.error('❌ [bianca-bump] Error:', e.message);
+    }
+  }
+
+  // Run on the hour
+  cron.schedule('0 * * * *', runBiancaBump);
+  console.log('📢 [bianca-bump] Hourly bump loop started (standalone, no AI)');
 });
