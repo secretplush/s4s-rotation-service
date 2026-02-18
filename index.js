@@ -2479,6 +2479,24 @@ app.post('/webhooks/onlyfans', async (req, res) => {
         webhookStats.totalEvents++;
         webhookStats.byType[event] = (webhookStats.byType[event] || 0) + 1;
         webhookStats.lastEventAt = new Date().toISOString();
+        
+        // Wake OpenClaw chatbot via webhook (event-driven, no polling needed)
+        try {
+          const tunnelUrl = await redis.get('openclaw:tunnel_url');
+          const hookToken = await redis.get('openclaw:hook_token');
+          if (tunnelUrl && hookToken) {
+            // Debounce: only wake if last wake was >30s ago
+            const lastWake = await redis.get('openclaw:last_wake') || 0;
+            if (Date.now() - Number(lastWake) > 30000) {
+              await redis.set('openclaw:last_wake', Date.now());
+              fetch(`${tunnelUrl}/hooks/wake`, {
+                method: 'POST',
+                headers: { 'Authorization': `Bearer ${hookToken}`, 'Content-Type': 'application/json' },
+                body: JSON.stringify({ text: `Fan message from ${fanId} on ${account_id}`, mode: 'now' })
+              }).catch(e => console.log('⚠️ OpenClaw wake failed:', e.message));
+            }
+          }
+        } catch (e) { /* silent */ }
       }
       
       // Biancawoods chatbot: handle messages
@@ -2524,6 +2542,23 @@ app.post('/webhooks/onlyfans', async (req, res) => {
         await redis.zadd(`webhook:pending:${account_id}`, { score: Date.now(), member: String(fanId) });
         await redis.sadd(`purchased:${account_id}:${fanId}`, `ppv_${Date.now()}`);
         await redis.sadd(`seen:${account_id}:${fanId}`, `ppv_${Date.now()}`);
+        
+        // Wake OpenClaw for upsell opportunity
+        try {
+          const tunnelUrl = await redis.get('openclaw:tunnel_url');
+          const hookToken = await redis.get('openclaw:hook_token');
+          if (tunnelUrl && hookToken) {
+            const lastWake = await redis.get('openclaw:last_wake') || 0;
+            if (Date.now() - Number(lastWake) > 30000) {
+              await redis.set('openclaw:last_wake', Date.now());
+              fetch(`${tunnelUrl}/hooks/wake`, {
+                method: 'POST',
+                headers: { 'Authorization': `Bearer ${hookToken}`, 'Content-Type': 'application/json' },
+                body: JSON.stringify({ text: `PPV purchased by ${fanId} ($${price}) on ${account_id} - upsell opportunity`, mode: 'now' })
+              }).catch(e => console.log('⚠️ OpenClaw wake failed:', e.message));
+            }
+          }
+        } catch (e) { /* silent */ }
         
         // If relay mode, push purchase event to relay queue so external brain can follow up
         const relayMode = await redis.get('chatbot:relay_mode');
@@ -3961,6 +3996,21 @@ app.post('/webhooks/newsubs/:accountId/clear', async (req, res) => {
 // GET /webhooks/stats — webhook event counts
 app.get('/webhooks/stats', (req, res) => {
   res.json(webhookStats);
+});
+
+// === OPENCLAW TUNNEL CONFIG ===
+app.post('/openclaw/tunnel', async (req, res) => {
+  const { url, token } = req.body;
+  if (url) await redis.set('openclaw:tunnel_url', url);
+  if (token) await redis.set('openclaw:hook_token', token);
+  console.log(`🔗 OpenClaw tunnel updated: ${url}`);
+  res.json({ ok: true, url, tokenSet: !!token });
+});
+
+app.get('/openclaw/tunnel', async (req, res) => {
+  const url = await redis.get('openclaw:tunnel_url');
+  const hasToken = !!(await redis.get('openclaw:hook_token'));
+  res.json({ url, hasToken });
 });
 
 // === START SERVER ===
