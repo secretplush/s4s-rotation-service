@@ -645,18 +645,7 @@ function generateDailySchedule(models, vaultMappings) {
 }
 
 // Per-target caption overrides (e.g. birthdays, promos). Takes priority over GHOST_CAPTIONS.
-const CAPTION_OVERRIDES = {
-  'andreaelizabethxo': [
-    "it's my girl @{target}'s birthday 🎂 go show her some love before she gets too naughty tonight 😈",
-    "birthday girl @{target} is feeling extra generous today 🎁💕 trust me u don't wanna miss this",
-    "someone go wish @{target} happy birthday rn 🥳 she's giving out surprises all day 👀",
-    "happy birthday to my fav @{target} 🎂💕 go tell her she's gorgeous for me",
-    "my bestie @{target} turns another year hotter today 🔥 go sub and see what i mean",
-    "it's @{target}'s bday!! 🎉 she's literally the sweetest go show her love",
-    "@{target} has something special planned for her birthday 👀🎂 don't miss it",
-    "birthday content from @{target} today only 🎁 ur welcome 😘"
-  ]
-};
+const CAPTION_OVERRIDES = {};
 
 function getRandomCaption(targetUsername) {
   const overrides = CAPTION_OVERRIDES[targetUsername];
