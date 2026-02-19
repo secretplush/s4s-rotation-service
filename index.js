@@ -4058,9 +4058,9 @@ app.get('/webhooks/stats', (req, res) => {
 const CANARY_CONFIG = {
   enabled: true,
   accountId: 'acct_54e3119e77da4429b6537f7dd2883a05',
-  maxFansPerMinute: 1,
-  maxOpusTotal: 50,
-  canaryDurationMs: 60 * 60 * 1000, // 60 minutes
+  maxFansPerMinute: 2,
+  maxOpusTotal: 120,
+  canaryDurationMs: 90 * 60 * 1000, // 90 minutes
   fanLockTTL: 90, // seconds
 };
 
