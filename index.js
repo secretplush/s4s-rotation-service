@@ -2542,9 +2542,10 @@ app.post('/webhooks/onlyfans', async (req, res) => {
       const fanId = payload?.user_id || payload?.user?.id;
       if (fanId) {
         await addNewSubExcludeTracked(username, numericAccountId, fanId);
-        // Welcome new subscriber directly (no OpenClaw needed)
+        // New sub → add to pending queue for dispatch system (no direct chatbot calls)
         if (account_id === 'acct_54e3119e77da4429b6537f7dd2883a05') {
-          biancaChatbot.handleWebhookEvent('subscriptions.new', { fanId, user_id: fanId });
+          await redis.zadd(`webhook:pending:${account_id}`, { score: Date.now(), member: String(fanId) });
+          await redis.set(`webhook:msg:${account_id}:${fanId}`, '__NEW_SUBSCRIBER__', { ex: 86400 });
         }
       }
     }
@@ -2570,12 +2571,7 @@ app.post('/webhooks/onlyfans', async (req, res) => {
         webhookStats.byType[event] = (webhookStats.byType[event] || 0) + 1;
         webhookStats.lastEventAt = new Date().toISOString();
         
-        // Fan messages handled directly by chatbot-engine (Anthropic API) — no OpenClaw needed
-      }
-      
-      // Biancawoods chatbot: handle messages
-      if (account_id === biancaChatbot.BIANCA_ACCOUNT_ID && fanId) {
-        biancaChatbot.handleWebhookEvent(event, { ...payload, fanId });
+        // Fan messages queued in Redis pending set — dispatch system handles processing
       }
 
       // Chatbot: handle milliexhart messages
@@ -4055,6 +4051,184 @@ app.post('/webhooks/newsubs/:accountId/clear', async (req, res) => {
 // GET /webhooks/stats — webhook event counts
 app.get('/webhooks/stats', (req, res) => {
   res.json(webhookStats);
+});
+
+// === CANARY DISPATCH SYSTEM (code-only, no LLM for dispatch) ===
+
+const CANARY_CONFIG = {
+  enabled: true,
+  accountId: 'acct_54e3119e77da4429b6537f7dd2883a05',
+  maxFansPerMinute: 1,
+  maxOpusTotal: 50,
+  canaryDurationMs: 60 * 60 * 1000, // 60 minutes
+  fanLockTTL: 90, // seconds
+};
+
+// GET /dispatch/status — canary health check
+app.get('/dispatch/status', async (req, res) => {
+  try {
+    const opusTotal = parseInt(await redis.get('canary:opus_total') || '0');
+    const canaryStart = parseInt(await redis.get('canary:start_time') || '0');
+    const elapsed = canaryStart ? Date.now() - canaryStart : 0;
+    const minuteCount = parseInt(await redis.get('canary:minute_count') || '0');
+    const eventsSeenCount = await redis.scard('canary:events_seen') || 0;
+    const lockedFans = await redis.keys('fan_lock:*');
+    
+    res.json({
+      canaryEnabled: CANARY_CONFIG.enabled,
+      opusCallsTotal: opusTotal,
+      opusLimit: CANARY_CONFIG.maxOpusTotal,
+      fansThisMinute: minuteCount,
+      minuteLimit: CANARY_CONFIG.maxFansPerMinute,
+      elapsedMs: elapsed,
+      canaryDurationMs: CANARY_CONFIG.canaryDurationMs,
+      canaryExpired: canaryStart ? elapsed > CANARY_CONFIG.canaryDurationMs : false,
+      eventsProcessed: eventsSeenCount,
+      activeLocks: lockedFans.length,
+    });
+  } catch (e) {
+    res.status(500).json({ error: e.message });
+  }
+});
+
+// POST /dispatch/tick — code-only dispatcher, called by OpenClaw cron (systemEvent → exec curl)
+// Returns { action: "spawn", fans: [...] } or { action: "skip", reason: "..." }
+app.post('/dispatch/tick', async (req, res) => {
+  try {
+    const accountId = CANARY_CONFIG.accountId;
+
+    // 1. Check canary limits
+    if (!CANARY_CONFIG.enabled) return res.json({ action: 'skip', reason: 'canary disabled' });
+
+    const opusTotal = parseInt(await redis.get('canary:opus_total') || '0');
+    if (opusTotal >= CANARY_CONFIG.maxOpusTotal) {
+      return res.json({ action: 'skip', reason: `opus limit reached (${opusTotal}/${CANARY_CONFIG.maxOpusTotal})` });
+    }
+
+    const canaryStart = parseInt(await redis.get('canary:start_time') || '0');
+    if (canaryStart && (Date.now() - canaryStart) > CANARY_CONFIG.canaryDurationMs) {
+      return res.json({ action: 'skip', reason: 'canary period expired' });
+    }
+
+    // 2. Check minute rate limit (sliding window)
+    const minuteKey = `canary:minute:${Math.floor(Date.now() / 60000)}`;
+    const minuteCount = parseInt(await redis.get(minuteKey) || '0');
+    if (minuteCount >= CANARY_CONFIG.maxFansPerMinute) {
+      return res.json({ action: 'skip', reason: `minute limit (${minuteCount}/${CANARY_CONFIG.maxFansPerMinute})` });
+    }
+
+    // 3. Read pending queue (DB/Redis only — NO OF API calls)
+    const raw = await redis.zrange(`webhook:pending:${accountId}`, 0, -1, { withScores: true });
+    if (!raw || raw.length === 0) {
+      return res.json({ action: 'skip', reason: 'queue empty' });
+    }
+
+    // Parse pending into [{fanId, timestamp}]
+    let pending = [];
+    if (raw.length > 0 && typeof raw[0] === 'object' && 'member' in raw[0]) {
+      pending = raw.map(r => ({ fanId: r.member, timestamp: r.score }));
+    } else {
+      for (let i = 0; i < raw.length; i += 2) {
+        pending.push({ fanId: raw[i], timestamp: raw[i + 1] });
+      }
+    }
+
+    // 4. Filter: skip locked fans, skip already-seen events
+    const eligible = [];
+    for (const fan of pending) {
+      // Event idempotency
+      const eventKey = `${fan.fanId}:${fan.timestamp}`;
+      const seen = await redis.sismember('canary:events_seen', eventKey);
+      if (seen) continue;
+
+      // Fan lock check
+      const lockKey = `fan_lock:${accountId}:${fan.fanId}`;
+      const locked = await redis.get(lockKey);
+      if (locked) continue;
+
+      eligible.push(fan);
+      if (eligible.length >= 1) break; // canary: max 1 fan per tick
+    }
+
+    if (eligible.length === 0) {
+      return res.json({ action: 'skip', reason: 'no eligible fans (all locked or seen)' });
+    }
+
+    // 5. Acquire locks + mark events seen
+    for (const fan of eligible) {
+      const lockKey = `fan_lock:${accountId}:${fan.fanId}`;
+      await redis.set(lockKey, Date.now().toString(), { ex: CANARY_CONFIG.fanLockTTL });
+      await redis.sadd('canary:events_seen', `${fan.fanId}:${fan.timestamp}`);
+    }
+
+    // 6. Increment counters
+    await redis.incr('canary:opus_total');
+    await redis.incr(minuteKey);
+    await redis.expire(minuteKey, 120); // TTL 2 min
+    if (!canaryStart) {
+      await redis.set('canary:start_time', Date.now().toString());
+    }
+
+    // 7. Get message context for each fan
+    const fansWithContext = [];
+    for (const fan of eligible) {
+      const msg = await redis.get(`webhook:msg:${accountId}:${fan.fanId}`);
+      fansWithContext.push({ fanId: fan.fanId, timestamp: fan.timestamp, lastMessage: msg || null });
+    }
+
+    return res.json({ action: 'spawn', fans: fansWithContext });
+  } catch (e) {
+    console.error('❌ Dispatch tick error:', e.message);
+    res.status(500).json({ action: 'error', reason: e.message });
+  }
+});
+
+// POST /dispatch/complete — called after Opus worker finishes, releases lock + clears pending
+app.post('/dispatch/complete', async (req, res) => {
+  try {
+    const { fanIds, accountId } = req.body;
+    if (!fanIds || !accountId) return res.status(400).json({ error: 'fanIds and accountId required' });
+
+    for (const fanId of fanIds) {
+      // Release lock
+      await redis.del(`fan_lock:${accountId}:${fanId}`);
+      // Clear from pending queue
+      await redis.zrem(`webhook:pending:${accountId}`, String(fanId));
+    }
+
+    res.json({ ok: true, cleared: fanIds.length });
+  } catch (e) {
+    res.status(500).json({ error: e.message });
+  }
+});
+
+// POST /dispatch/abort — called on Opus error (429 etc), releases locks but keeps in queue
+app.post('/dispatch/abort', async (req, res) => {
+  try {
+    const { fanIds, accountId, reason } = req.body;
+    if (!fanIds || !accountId) return res.status(400).json({ error: 'fanIds and accountId required' });
+
+    for (const fanId of fanIds) {
+      await redis.del(`fan_lock:${accountId}:${fanId}`);
+      // Remove from events_seen so they can be retried
+      const members = await redis.smembers('canary:events_seen');
+      for (const m of members) {
+        if (m.startsWith(`${fanId}:`)) {
+          await redis.srem('canary:events_seen', m);
+        }
+      }
+    }
+
+    // If it's a rate limit, disable canary
+    if (reason === '429') {
+      CANARY_CONFIG.enabled = false;
+      console.log('🛑 Canary DISABLED due to 429');
+    }
+
+    res.json({ ok: true, released: fanIds.length, canaryEnabled: CANARY_CONFIG.enabled });
+  } catch (e) {
+    res.status(500).json({ error: e.message });
+  }
 });
 
 // === OPENCLAW TUNNEL CONFIG ===
