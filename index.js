@@ -4073,6 +4073,12 @@ app.get('/dispatch/status', async (req, res) => {
     const minuteCount = parseInt(await redis.get('canary:minute_count') || '0');
     const eventsSeenCount = await redis.scard('canary:events_seen') || 0;
     const lockedFans = await redis.keys('fan_lock:*');
+    const ofApiTotal = parseInt(await redis.get('canary:of_api_calls') || '0');
+    const ofApiMinKey = `canary:of_api_min:${Math.floor(Date.now() / 60000)}`;
+    const ofApiThisMin = parseInt(await redis.get(ofApiMinKey) || '0');
+    const skipsTotal = parseInt(await redis.get('canary:skips_total') || '0');
+    const sendsTotal = parseInt(await redis.get('canary:sends_total') || '0');
+    const ppvsSent = parseInt(await redis.get('canary:ppvs_sent') || '0');
     
     res.json({
       canaryEnabled: CANARY_CONFIG.enabled,
@@ -4085,6 +4091,12 @@ app.get('/dispatch/status', async (req, res) => {
       canaryExpired: canaryStart ? elapsed > CANARY_CONFIG.canaryDurationMs : false,
       eventsProcessed: eventsSeenCount,
       activeLocks: lockedFans.length,
+      ofApiCalls: { total: ofApiTotal, thisMinute: ofApiThisMin },
+      fanLockTTL: CANARY_CONFIG.fanLockTTL,
+      eventSeenTTL: '48h',
+      skipsTotal,
+      sendsTotal,
+      ppvsSent,
     });
   } catch (e) {
     res.status(500).json({ error: e.message });
@@ -4136,9 +4148,9 @@ app.post('/dispatch/tick', async (req, res) => {
     // 4. Filter: skip locked fans, skip already-seen events
     const eligible = [];
     for (const fan of pending) {
-      // Event idempotency
+      // Event idempotency (48h TTL keys)
       const eventKey = `${fan.fanId}:${fan.timestamp}`;
-      const seen = await redis.sismember('canary:events_seen', eventKey);
+      const seen = await redis.get(`canary:seen:${eventKey}`);
       if (seen) continue;
 
       // Fan lock check
@@ -4158,6 +4170,8 @@ app.post('/dispatch/tick', async (req, res) => {
     for (const fan of eligible) {
       const lockKey = `fan_lock:${accountId}:${fan.fanId}`;
       await redis.set(lockKey, Date.now().toString(), { ex: CANARY_CONFIG.fanLockTTL });
+      // Use per-event keys with 48h TTL instead of unbounded set
+      await redis.set(`canary:seen:${fan.fanId}:${fan.timestamp}`, '1', { ex: 172800 });
       await redis.sadd('canary:events_seen', `${fan.fanId}:${fan.timestamp}`);
     }
 
@@ -4180,6 +4194,25 @@ app.post('/dispatch/tick', async (req, res) => {
   } catch (e) {
     console.error('❌ Dispatch tick error:', e.message);
     res.status(500).json({ action: 'error', reason: e.message });
+  }
+});
+
+// POST /dispatch/track — log OF API calls + send/skip/ppv stats from Opus workers
+app.post('/dispatch/track', async (req, res) => {
+  try {
+    const { ofApiCalls, sent, skipped, ppvsSent } = req.body;
+    if (ofApiCalls) {
+      await redis.incrby('canary:of_api_calls', ofApiCalls);
+      const minKey = `canary:of_api_min:${Math.floor(Date.now() / 60000)}`;
+      await redis.incrby(minKey, ofApiCalls);
+      await redis.expire(minKey, 120);
+    }
+    if (sent) await redis.incrby('canary:sends_total', sent);
+    if (skipped) await redis.incrby('canary:skips_total', skipped);
+    if (ppvsSent) await redis.incrby('canary:ppvs_sent', ppvsSent);
+    res.json({ ok: true });
+  } catch (e) {
+    res.status(500).json({ error: e.message });
   }
 });
 
