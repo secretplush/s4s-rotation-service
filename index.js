@@ -4064,6 +4064,35 @@ const CANARY_CONFIG = {
   fanLockTTL: 90, // seconds
 };
 
+// Permanently excluded fans — DO NOT MESSAGE under any circumstances
+const EXCLUDED_FAN_IDS = new Set([
+  '483664969', '482383508',  // nij444, tylerd34 (original excludes)
+  '550962076',               // crisis situation — human review only
+]);
+
+// Crisis keywords — if detected, auto-exclude fan and send safety message only
+const CRISIS_KEYWORDS = [
+  'kicked out', 'homeless', 'nowhere to go', 'pick me up', 'come get me',
+  'self harm', 'self-harm', 'kill myself', 'want to die', 'suicide',
+  'being beaten', 'hit me', 'abused', 'violence', 'help me please',
+  'emergency', 'in danger', 'scared for my life', 'address is', 'my address',
+];
+
+function detectCrisis(message) {
+  if (!message) return false;
+  const lower = message.toLowerCase();
+  return CRISIS_KEYWORDS.some(kw => lower.includes(kw));
+}
+
+// Load persisted excludes from Redis on startup
+(async () => {
+  try {
+    const persisted = await redis.smembers('dispatch:excluded_fans');
+    if (persisted) persisted.forEach(id => EXCLUDED_FAN_IDS.add(id));
+    console.log(`🚫 Loaded ${EXCLUDED_FAN_IDS.size} excluded fans (${persisted?.length || 0} from Redis)`);
+  } catch (e) { console.error('Failed to load excluded fans:', e.message); }
+})();
+
 // GET /dispatch/status — canary health check
 app.get('/dispatch/status', async (req, res) => {
   try {
@@ -4145,9 +4174,31 @@ app.post('/dispatch/tick', async (req, res) => {
       }
     }
 
-    // 4. Filter: skip locked fans, skip already-seen events
+    // 4. Filter: skip excluded, locked, already-seen fans
     const eligible = [];
     for (const fan of pending) {
+      // Permanent exclusion check (highest priority)
+      if (EXCLUDED_FAN_IDS.has(String(fan.fanId))) {
+        // Remove from queue silently — never process
+        await redis.zrem(`webhook:pending:${accountId}`, fan.fanId);
+        console.log(`🚫 Excluded fan ${fan.fanId} removed from queue`);
+        continue;
+      }
+
+      // Crisis keyword detection
+      const msg = await redis.get(`webhook:msg:${accountId}:${fan.fanId}`);
+      if (detectCrisis(msg)) {
+        // Auto-exclude and flag for human review
+        EXCLUDED_FAN_IDS.add(String(fan.fanId));
+        await redis.zrem(`webhook:pending:${accountId}`, fan.fanId);
+        await redis.set(`crisis:flagged:${fan.fanId}`, JSON.stringify({ 
+          timestamp: Date.now(), message: msg, status: 'HUMAN_REVIEW' 
+        }));
+        console.log(`🆘 CRISIS detected for fan ${fan.fanId}: "${msg}" — auto-excluded, flagged for human review`);
+        // Return immediately with crisis action so caller can send safety message
+        return res.json({ action: 'crisis', fanId: fan.fanId, message: msg });
+      }
+
       // Event idempotency (48h TTL keys)
       const eventKey = `${fan.fanId}:${fan.timestamp}`;
       const seen = await redis.get(`canary:seen:${eventKey}`);
@@ -4259,6 +4310,36 @@ app.post('/dispatch/abort', async (req, res) => {
     }
 
     res.json({ ok: true, released: fanIds.length, canaryEnabled: CANARY_CONFIG.enabled });
+  } catch (e) {
+    res.status(500).json({ error: e.message });
+  }
+});
+
+// POST /dispatch/exclude — add fan to permanent exclude list
+app.post('/dispatch/exclude', async (req, res) => {
+  try {
+    const { fanId, reason } = req.body;
+    if (!fanId) return res.status(400).json({ error: 'fanId required' });
+    EXCLUDED_FAN_IDS.add(String(fanId));
+    // Also remove from pending queue
+    const accountId = CANARY_CONFIG.accountId;
+    await redis.zrem(`webhook:pending:${accountId}`, String(fanId));
+    // Persist in Redis so it survives redeploys
+    await redis.sadd('dispatch:excluded_fans', String(fanId));
+    await redis.set(`dispatch:exclude_reason:${fanId}`, reason || 'manual');
+    console.log(`🚫 Fan ${fanId} permanently excluded: ${reason || 'manual'}`);
+    res.json({ ok: true, excluded: Array.from(EXCLUDED_FAN_IDS) });
+  } catch (e) {
+    res.status(500).json({ error: e.message });
+  }
+});
+
+// GET /dispatch/excluded — list all excluded fans
+app.get('/dispatch/excluded', async (req, res) => {
+  try {
+    const persisted = await redis.smembers('dispatch:excluded_fans') || [];
+    const all = new Set([...EXCLUDED_FAN_IDS, ...persisted]);
+    res.json({ excluded: Array.from(all) });
   } catch (e) {
     res.status(500).json({ error: e.message });
   }
