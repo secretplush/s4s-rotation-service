@@ -4264,6 +4264,23 @@ app.post('/dispatch/abort', async (req, res) => {
   }
 });
 
+// POST /dispatch/reset — reset canary counters for new run
+app.post('/dispatch/reset', async (req, res) => {
+  try {
+    await redis.set('canary:opus_total', '0');
+    await redis.set('canary:start_time', '0');
+    await redis.set('canary:minute_count', '0');
+    await redis.set('canary:sends_total', '0');
+    await redis.set('canary:skips_total', '0');
+    await redis.set('canary:ppvs_sent', '0');
+    await redis.set('canary:of_api_calls', '0');
+    CANARY_CONFIG.enabled = true;
+    res.json({ ok: true, message: 'Canary counters reset, system enabled' });
+  } catch (e) {
+    res.status(500).json({ error: e.message });
+  }
+});
+
 // === OPENCLAW TUNNEL CONFIG ===
 app.post('/openclaw/tunnel', async (req, res) => {
   const { url, token } = req.body;
