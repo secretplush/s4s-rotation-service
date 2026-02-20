@@ -613,22 +613,42 @@ async function getVaultIdForUse(promoter, target, use, v1Mappings) {
   return v1Mappings[promoter]?.[target] || null;
 }
 
-async function loadModelAccounts() {
-  try {
-    const res = await fetch(`${OF_API_BASE}/accounts`, {
-      headers: { 'Authorization': `Bearer ${OF_API_KEY}` }
-    });
-    const accounts = await res.json();
-    
-    const accountMap = {};
-    for (const acct of accounts) {
-      if (acct.onlyfans_username) {
-        accountMap[acct.onlyfans_username] = acct.id;
-      }
+// Cached accounts — refreshes every 10 min instead of every call (~20K API calls/day saved)
+let _modelAccountsCache = null;
+let _modelAccountsCacheTs = 0;
+const MODEL_ACCOUNTS_CACHE_TTL = 10 * 60 * 1000; // 10 minutes
+
+async function _refreshAccountsCache() {
+  const res = await fetch(`${OF_API_BASE}/accounts`, {
+    headers: { 'Authorization': `Bearer ${OF_API_KEY}` }
+  });
+  const accounts = await res.json();
+  
+  const accountMap = {};
+  const idMap = {};
+  for (const acct of accounts) {
+    if (acct.onlyfans_username) {
+      accountMap[acct.onlyfans_username] = acct.id;
+      if (acct.id) idMap[acct.id] = acct.onlyfans_username;
     }
-    return accountMap;
+  }
+  _modelAccountsCache = accountMap;
+  accountIdToUsername = idMap;
+  _modelAccountsCacheTs = Date.now();
+  console.log(`📋 Refreshed accounts cache: ${Object.keys(accountMap).length} accounts`);
+  return accountMap;
+}
+
+async function loadModelAccounts(forceRefresh = false) {
+  const now = Date.now();
+  if (!forceRefresh && _modelAccountsCache && (now - _modelAccountsCacheTs) < MODEL_ACCOUNTS_CACHE_TTL) {
+    return _modelAccountsCache;
+  }
+  try {
+    return await _refreshAccountsCache();
   } catch (e) {
     console.error('Failed to load accounts:', e);
+    if (_modelAccountsCache) return _modelAccountsCache;
     return {};
   }
 }
@@ -1387,22 +1407,10 @@ async function loadExcludeListIds() {
 // Build reverse map: account_id → username (cached)
 let accountIdToUsername = {};
 
-async function buildAccountIdMap() {
-  try {
-    const res = await fetch(`${OF_API_BASE}/accounts`, {
-      headers: { 'Authorization': `Bearer ${OF_API_KEY}` }
-    });
-    const accounts = await res.json();
-    accountIdToUsername = {};
-    for (const acct of accounts) {
-      if (acct.onlyfans_username && acct.id) {
-        accountIdToUsername[acct.id] = acct.onlyfans_username;
-      }
-    }
-    console.log(`📋 Built account ID→username map: ${Object.keys(accountIdToUsername).length} accounts`);
-  } catch (e) {
-    console.error('Failed to build account ID map:', e.message);
-  }
+async function buildAccountIdMap(forceRefresh = false) {
+  // Now piggybacks on shared cache — both maps built from same API call
+  await loadModelAccounts(forceRefresh);
+  console.log(`📋 Account ID→username map: ${Object.keys(accountIdToUsername).length} accounts`);
 }
 
 async function ensureExcludeListsForAccount(username, accountId) {
