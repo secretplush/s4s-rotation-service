@@ -25,7 +25,7 @@ const ANTHROPIC_API_KEY = process.env.ANTHROPIC_API_KEY;
 // Webhook stats (used by both webhook handler and stats endpoint)
 const webhookStats = { totalEvents: 0, byType: {}, lastEventAt: null };
 
-// OpenClaw agent webhook — event-driven chatbot (no polling crons)
+// OpenClaw lightweight poke — triggers cron dispatcher, NO Opus calls
 const BIANCA_ACCOUNT_ID_CONST = 'acct_54e3119e77da4429b6537f7dd2883a05';
 async function wakeOpenClawAgent(eventType, context) {
   try {
@@ -34,91 +34,22 @@ async function wakeOpenClawAgent(eventType, context) {
     const hookToken = await redis.get('openclaw:hook_token');
     if (!tunnelUrl || !hookToken) return;
 
-    // Debounce: only wake if last wake was >30s ago
+    // Debounce: only wake if last wake was >5s ago
     const lastWake = await redis.get('openclaw:last_wake') || 0;
-    if (Date.now() - Number(lastWake) < 30000) return;
+    if (Date.now() - Number(lastWake) < 5000) return;
     await redis.set('openclaw:last_wake', Date.now());
 
-    // Current date/time for agent context
-    const now = new Date();
-    const days = ['Sunday','Monday','Tuesday','Wednesday','Thursday','Friday','Saturday'];
-    const dateStr = `${now.toLocaleString('en-US', { timeZone: 'America/New_York', weekday: 'long' })}, ${now.toLocaleString('en-US', { timeZone: 'America/New_York', dateStyle: 'full', timeStyle: 'short' })}`;
+    // Record webhook timestamp for latency tracking
+    await redis.set(`bianca:webhook_ts:${context.fanId}`, Date.now());
 
-    let message;
-    if (eventType === 'new_subscriber') {
-      message = `New subscriber on Bianca: fan ${context.fanId}
-Current date/time: ${dateStr} (AST)
-
-You are Bianca Woods. A new fan just subscribed. Send them a warm, personal welcome with a free GFE selfie.
-
-API base: https://app.onlyfansapi.com/api/${BIANCA_ACCOUNT_ID_CONST}
-Auth: Authorization: Bearer ${OF_API_KEY}
-
-Read research/bianca-agent-prompt.md for your persona and all vault IDs.
-
-GFE Selfies (pick ONE randomly): ["4129214996", "4129214993", "4118094231", "4118094226", "4113019829", "4113019824", "4113019823", "4113019822", "4113019819", "4112955857", "4112955856"]
-
-Send a casual opener with the selfie:
-POST {base}/chats/${context.fanId}/messages — body: {"text": "your message", "mediaFiles": ["selfie_id"]}
-
-Messages (pick one, vary):
-- "heyyy 🥰 just saw u subbed, what made u check me out?"
-- "hiii 💕 glad ur here… tell me something about urself"
-- "omg new face 🙈 hi babe whats ur name?"
-- "heyyy cutie 😏 so what are u into?"
-
-EXCLUDE fan IDs: 483664969, 482383508. Usernames: nij444, tylerd34.
-If this fan is excluded, do nothing.`;
-    } else {
-      // Fan message or purchase — process pending fans
-      message = `Process pending Bianca fans. Event: ${eventType}
-Current date/time: ${dateStr} (AST)
-
-Bianca's user ID: 525755724
-API base: https://app.onlyfansapi.com/api/${BIANCA_ACCOUNT_ID_CONST}
-Auth header: Authorization: Bearer ${OF_API_KEY}
-Railway base: https://s4s-worker-production.up.railway.app
-Account ID: ${BIANCA_ACCOUNT_ID_CONST}
-
-Check pending: curl -s https://s4s-worker-production.up.railway.app/webhooks/pending/${BIANCA_ACCOUNT_ID_CONST}
-
-Read research/bianca-agent-prompt.md for your persona, vault catalog, and all content IDs.
-Read research/chatbot-brain-v3.md for sales tactics.
-Read research/bianca-fan-state.json for fan history.
-Read research/bianca-dispatch-lock.json for dedup — skip fans processed <90s ago.
-
-⚠️ RATE LIMIT HANDLER: If ANY API call returns HTTP 429, IMMEDIATELY:
-1. Write {"timestamp": <current unix ms>, "reason": "429"} to research/bianca-rate-limit.json
-2. STOP all processing — do not retry, do not continue
-3. Report what happened
-
-For each fan (max 5):
-1. GET {API base}/chats/{fanId}/messages?limit=15
-2. Check Redis for sent content: GET {Railway base}/fans/{accountId}/{fanId}/sent
-3. Generate response AS Bianca
-4. Send via POST {API base}/chats/{fanId}/messages
-5. Log sent PPVs to Redis: POST {Railway base}/fans/{accountId}/{fanId}/sent
-6. Update research/bianca-fan-state.json
-7. Clear responded fans: POST {Railway base}/webhooks/pending/{accountId}/clear with {fanIds: [...]}
-
-EXCLUDE: IDs 483664969, 482383508. Usernames: nij444, tylerd34.
-UNDERAGE: If fan claims under 18, send 'heyy give me a sec' and STOP.
-Max 1 PPV per fan per response. PPV cap $100. Check Redis BEFORE every PPV.
-NEVER call /media/vault — all vault IDs are in bianca-agent-prompt.md.
-Momentum: ONE mention of old unopened PPV max, then send NEW content.`;
-    }
-
-    fetch(`${tunnelUrl}/hooks/agent`, {
+    // Lightweight wake — just poke the cron dispatcher, no Opus prompt
+    fetch(`${tunnelUrl}/hooks/wake`, {
       method: 'POST',
       headers: { 'Authorization': `Bearer ${hookToken}`, 'Content-Type': 'application/json' },
       body: JSON.stringify({
-        message,
-        sessionKey: `hook:bianca-${eventType}`,
-        model: 'anthropic/claude-opus-4-6',
-        deliver: false,
-        timeoutSeconds: 120
+        text: `BIANCA_POKE: ${eventType} from fan ${context.fanId}`
       })
-    }).catch(e => console.log('⚠️ OpenClaw agent wake failed:', e.message));
+    }).catch(e => console.log('⚠️ OpenClaw poke failed:', e.message));
   } catch (e) { /* silent */ }
 }
 
@@ -4053,6 +3984,65 @@ app.get('/webhooks/stats', (req, res) => {
   res.json(webhookStats);
 });
 
+// === LATENCY TRACKING ===
+
+// GET /latency/webhook/:fanId — get webhook received timestamp
+app.get('/latency/webhook/:fanId', async (req, res) => {
+  const ts = await redis.get(`bianca:webhook_ts:${req.params.fanId}`);
+  res.json({ fanId: req.params.fanId, webhook_received_at: ts ? Number(ts) : null });
+});
+
+// POST /latency/record — record a completed reply latency
+app.post('/latency/record', async (req, res) => {
+  try {
+    const { fanId, webhook_received_at, message_sent_at } = req.body;
+    const latencyMs = message_sent_at - webhook_received_at;
+    // Store in a sorted set for percentile calc (score = timestamp, member = JSON)
+    await redis.zadd('bianca:latency_log', Date.now(), JSON.stringify({
+      fanId, webhook_received_at, message_sent_at, latencyMs, ts: Date.now()
+    }));
+    // Keep only last 200 entries
+    const count = await redis.zcard('bianca:latency_log');
+    if (count > 200) await redis.zremrangebyrank('bianca:latency_log', 0, count - 201);
+    res.json({ recorded: true, latencyMs });
+  } catch (e) {
+    res.status(500).json({ error: e.message });
+  }
+});
+
+// GET /latency/report — avg + p95 latency
+app.get('/latency/report', async (req, res) => {
+  try {
+    const entries = await redis.zrange('bianca:latency_log', 0, -1);
+    if (!entries || entries.length === 0) return res.json({ count: 0, avg: null, p95: null, entries: [] });
+    const parsed = entries.map(e => JSON.parse(e));
+    const latencies = parsed.map(p => p.latencyMs).sort((a, b) => a - b);
+    const avg = Math.round(latencies.reduce((a, b) => a + b, 0) / latencies.length);
+    const p95idx = Math.floor(latencies.length * 0.95);
+    const p95 = latencies[Math.min(p95idx, latencies.length - 1)];
+    const windowMs = req.query.windowMs ? Number(req.query.windowMs) : null;
+    let filtered = parsed;
+    if (windowMs) {
+      const cutoff = Date.now() - windowMs;
+      filtered = parsed.filter(p => p.ts > cutoff);
+      const fLat = filtered.map(p => p.latencyMs).sort((a, b) => a - b);
+      if (fLat.length > 0) {
+        return res.json({
+          count: fLat.length,
+          avg: Math.round(fLat.reduce((a, b) => a + b, 0) / fLat.length),
+          p95: fLat[Math.min(Math.floor(fLat.length * 0.95), fLat.length - 1)],
+          min: fLat[0],
+          max: fLat[fLat.length - 1],
+          window: `${windowMs / 60000}min`
+        });
+      }
+    }
+    res.json({ count: latencies.length, avg, p95, min: latencies[0], max: latencies[latencies.length - 1] });
+  } catch (e) {
+    res.status(500).json({ error: e.message });
+  }
+});
+
 // === CANARY DISPATCH SYSTEM (code-only, no LLM for dispatch) ===
 
 const CANARY_CONFIG = {
@@ -4463,7 +4453,7 @@ app.listen(PORT, async () => {
       // Delete previous bump message
       if (bumpState.lastMessageId) {
         try {
-          const delRes = await fetch(`${OF_API_BASE}/${BIANCA_BUMP_ACCOUNT}/mass-messages/${bumpState.lastMessageId}`, {
+          const delRes = await fetch(`${OF_API_BASE}/${BIANCA_BUMP_ACCOUNT}/mass-messaging/${bumpState.lastMessageId}`, {
             method: 'DELETE',
             headers: { 'Authorization': `Bearer ${OF_API_KEY}` }
           });
@@ -4485,7 +4475,7 @@ app.listen(PORT, async () => {
       const excludeUserIds = (activeMembers || []).map(Number).filter(n => !isNaN(n));
 
       // Send free mass message
-      const sendRes = await fetch(`${OF_API_BASE}/${BIANCA_BUMP_ACCOUNT}/mass-messages`, {
+      const sendRes = await fetch(`${OF_API_BASE}/${BIANCA_BUMP_ACCOUNT}/mass-messaging`, {
         method: 'POST',
         headers: { 'Authorization': `Bearer ${OF_API_KEY}`, 'Content-Type': 'application/json' },
         body: JSON.stringify({
