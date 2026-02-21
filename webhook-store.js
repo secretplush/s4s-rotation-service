@@ -1,15 +1,19 @@
 // webhook-store.js — Persistent webhook storage to Google Drive
-// Buffers all webhook events in Redis, flushes to Google Drive hourly as JSONL files.
+// Uses lightweight google-auth-library + raw fetch (no googleapis SDK)
 
-const { google } = require('googleapis');
+const { GoogleAuth } = require('google-auth-library');
 const cron = require('node-cron');
 
 const REDIS_KEY = 'webhook:archive:buffer';
 const DRIVE_ID = process.env.GOOGLE_DRIVE_ID;
+const DRIVE_API = 'https://www.googleapis.com/drive/v3';
+const UPLOAD_API = 'https://www.googleapis.com/upload/drive/v3';
 
-let driveService = null;
+let authClient = null;
 let redis = null;
 let folderCache = {}; // path -> folderId
+let totalBuffered = 0;
+let totalFlushed = 0;
 
 function init(redisClient) {
   redis = redisClient;
@@ -22,14 +26,14 @@ function init(redisClient) {
 
   try {
     const sa = JSON.parse(saJson);
-    const auth = new google.auth.GoogleAuth({
+    const auth = new GoogleAuth({
       credentials: sa,
       scopes: ['https://www.googleapis.com/auth/drive'],
     });
-    driveService = google.drive({ version: 'v3', auth });
+    authClient = auth;
     console.log('📦 Webhook store: Google Drive connected');
 
-    // Flush every hour at :05 (give webhooks time to settle)
+    // Flush every hour at :05
     cron.schedule('5 * * * *', () => flushToDrive());
     console.log('📦 Webhook store: Hourly flush scheduled');
 
@@ -40,7 +44,16 @@ function init(redisClient) {
   }
 }
 
-// Buffer a webhook event (called on every webhook)
+async function getHeaders() {
+  const client = await authClient.getClient();
+  const token = await client.getAccessToken();
+  return {
+    'Authorization': `Bearer ${token.token || token}`,
+    'Content-Type': 'application/json',
+  };
+}
+
+// Buffer a webhook event
 async function buffer(event, accountId, payload) {
   if (!redis) return;
   const entry = JSON.stringify({
@@ -50,129 +63,128 @@ async function buffer(event, accountId, payload) {
     ts: new Date().toISOString(),
   });
   await redis.rpush(REDIS_KEY, entry);
+  totalBuffered++;
 }
 
-// Get or create a folder by path (e.g., "webhooks/2026-02")
+// Find or create a folder
 async function getOrCreateFolder(name, parentId) {
   const cacheKey = `${parentId}/${name}`;
   if (folderCache[cacheKey]) return folderCache[cacheKey];
 
-  // Search for existing folder
-  const q = `name='${name}' and '${parentId}' in parents and mimeType='application/vnd.google-apps.folder' and trashed=false`;
-  const res = await driveService.files.list({
-    q,
-    driveId: DRIVE_ID,
-    corpora: 'drive',
-    includeItemsFromAllDrives: true,
-    supportsAllDrives: true,
-    fields: 'files(id,name)',
-  });
+  const headers = await getHeaders();
+  const q = encodeURIComponent(`name='${name}' and '${parentId}' in parents and mimeType='application/vnd.google-apps.folder' and trashed=false`);
+  const res = await fetch(`${DRIVE_API}/files?q=${q}&driveId=${DRIVE_ID}&corpora=drive&includeItemsFromAllDrives=true&supportsAllDrives=true&fields=files(id,name)`, { headers });
+  const data = await res.json();
 
-  if (res.data.files.length > 0) {
-    folderCache[cacheKey] = res.data.files[0].id;
-    return res.data.files[0].id;
+  if (data.files && data.files.length > 0) {
+    folderCache[cacheKey] = data.files[0].id;
+    return data.files[0].id;
   }
 
   // Create folder
-  const folder = await driveService.files.create({
-    requestBody: {
+  const createRes = await fetch(`${DRIVE_API}/files?supportsAllDrives=true`, {
+    method: 'POST',
+    headers,
+    body: JSON.stringify({
       name,
       mimeType: 'application/vnd.google-apps.folder',
       parents: [parentId],
-    },
-    supportsAllDrives: true,
-    fields: 'id',
+    }),
   });
-
-  folderCache[cacheKey] = folder.data.id;
-  return folder.data.id;
+  const folder = await createRes.json();
+  folderCache[cacheKey] = folder.id;
+  return folder.id;
 }
 
-// Append data to an existing file or create new one
+// Append to existing file or create new
 async function appendOrCreateFile(fileName, folderId, content) {
-  // Search for existing file
-  const q = `name='${fileName}' and '${folderId}' in parents and trashed=false`;
-  const res = await driveService.files.list({
-    q,
-    driveId: DRIVE_ID,
-    corpora: 'drive',
-    includeItemsFromAllDrives: true,
-    supportsAllDrives: true,
-    fields: 'files(id,name)',
-  });
+  const headers = await getHeaders();
+  const q = encodeURIComponent(`name='${fileName}' and '${folderId}' in parents and trashed=false`);
+  const res = await fetch(`${DRIVE_API}/files?q=${q}&driveId=${DRIVE_ID}&corpora=drive&includeItemsFromAllDrives=true&supportsAllDrives=true&fields=files(id,name)`, { headers });
+  const data = await res.json();
 
-  if (res.data.files.length > 0) {
-    // Download existing content, append, re-upload
-    const fileId = res.data.files[0].id;
-    const existing = await driveService.files.get({
-      fileId,
-      alt: 'media',
-      supportsAllDrives: true,
-    });
-    const merged = (existing.data || '') + content;
-    await driveService.files.update({
-      fileId,
-      media: { mimeType: 'application/x-ndjson', body: merged },
-      supportsAllDrives: true,
+  if (data.files && data.files.length > 0) {
+    // Download existing, append, re-upload
+    const fileId = data.files[0].id;
+    const dlRes = await fetch(`${DRIVE_API}/files/${fileId}?alt=media&supportsAllDrives=true`, { headers });
+    const existing = await dlRes.text();
+    const merged = existing + content;
+
+    await fetch(`${UPLOAD_API}/files/${fileId}?uploadType=media&supportsAllDrives=true`, {
+      method: 'PATCH',
+      headers: { ...headers, 'Content-Type': 'application/x-ndjson' },
+      body: merged,
     });
     return fileId;
   } else {
-    // Create new file
-    const file = await driveService.files.create({
-      requestBody: {
-        name: fileName,
-        parents: [folderId],
+    // Create new file (multipart upload)
+    const boundary = 'webhook_boundary_123';
+    const metadata = JSON.stringify({ name: fileName, parents: [folderId] });
+    const multipart = [
+      `--${boundary}`,
+      'Content-Type: application/json; charset=UTF-8',
+      '',
+      metadata,
+      `--${boundary}`,
+      'Content-Type: application/x-ndjson',
+      '',
+      content,
+      `--${boundary}--`,
+    ].join('\r\n');
+
+    const createRes = await fetch(`${UPLOAD_API}/files?uploadType=multipart&supportsAllDrives=true`, {
+      method: 'POST',
+      headers: {
+        ...headers,
+        'Content-Type': `multipart/related; boundary=${boundary}`,
       },
-      media: { mimeType: 'application/x-ndjson', body: content },
-      supportsAllDrives: true,
-      fields: 'id',
+      body: multipart,
     });
-    return file.data.id;
+    const file = await createRes.json();
+    return file.id;
   }
 }
 
 // Flush buffered webhooks to Google Drive
 async function flushToDrive() {
-  if (!driveService || !redis) return;
+  if (!authClient || !redis) return;
 
   try {
-    // Atomic drain: get length, pop that many
     const len = await redis.llen(REDIS_KEY);
     if (len === 0) {
       console.log('📦 Webhook store: Nothing to flush');
-      return;
+      return { flushed: 0 };
     }
 
     // Pop all buffered events
     const entries = [];
     for (let i = 0; i < len; i++) {
       const entry = await redis.lpop(REDIS_KEY);
-      if (entry) entries.push(entry);
+      if (entry) entries.push(typeof entry === 'string' ? entry : JSON.stringify(entry));
     }
 
-    if (entries.length === 0) return;
+    if (entries.length === 0) return { flushed: 0 };
 
     // Group by date
     const byDate = {};
     for (const entry of entries) {
       try {
-        const parsed = JSON.parse(entry);
+        const parsed = typeof entry === 'string' ? JSON.parse(entry) : entry;
         const date = parsed.ts?.slice(0, 10) || new Date().toISOString().slice(0, 10);
         if (!byDate[date]) byDate[date] = [];
-        byDate[date].push(entry);
+        byDate[date].push(typeof entry === 'string' ? entry : JSON.stringify(entry));
       } catch {
-        // If can't parse, use today
         const today = new Date().toISOString().slice(0, 10);
         if (!byDate[today]) byDate[today] = [];
-        byDate[today].push(entry);
+        byDate[today].push(typeof entry === 'string' ? entry : JSON.stringify(entry));
       }
     }
 
-    // Upload each date's data
+    // Upload
     const webhooksFolderId = await getOrCreateFolder('webhooks', DRIVE_ID);
 
     for (const [date, dateEntries] of Object.entries(byDate)) {
-      const month = date.slice(0, 7); // 2026-02
+      const month = date.slice(0, 7);
       const monthFolderId = await getOrCreateFolder(month, webhooksFolderId);
       const fileName = `${date}.jsonl`;
       const content = dateEntries.join('\n') + '\n';
@@ -180,20 +192,21 @@ async function flushToDrive() {
       console.log(`📦 Webhook store: Flushed ${dateEntries.length} events to ${month}/${fileName}`);
     }
 
+    totalFlushed += entries.length;
     console.log(`📦 Webhook store: Total flushed ${entries.length} events`);
+    return { flushed: entries.length };
   } catch (e) {
     console.error('❌ Webhook store flush failed:', e.message);
-    // Don't lose data — events were already popped, push them back
-    // (best effort, some may be lost on catastrophic failure)
+    return { error: e.message };
   }
 }
 
-// Manual flush endpoint
 function getStats() {
   return {
-    driveConnected: !!driveService,
+    driveConnected: !!authClient,
     driveId: DRIVE_ID,
-    redisKey: REDIS_KEY,
+    totalBuffered,
+    totalFlushed,
   };
 }
 
