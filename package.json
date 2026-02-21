@@ -7,13 +7,18 @@
     "start": "node index.js",
     "dev": "node --watch index.js"
   },
-  "keywords": ["onlyfans", "s4s", "automation"],
+  "keywords": [
+    "onlyfans",
+    "s4s",
+    "automation"
+  ],
   "author": "Plush",
   "license": "ISC",
   "dependencies": {
     "@upstash/redis": "^1.34.4",
     "dotenv": "^16.5.0",
     "express": "^4.21.2",
+    "googleapis": "^171.4.0",
     "node-cron": "^3.0.3"
   },
   "engines": {

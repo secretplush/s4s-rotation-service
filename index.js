@@ -4,6 +4,7 @@ const cron = require('node-cron');
 const { Redis } = require('@upstash/redis');
 const chatbotBrain = require('./chatbot-brain');
 const biancaChatbot = require('./chatbot-engine');
+const webhookStore = require('./webhook-store');
 
 const app = express();
 app.use(express.json({ limit: '10mb' }));
@@ -55,6 +56,7 @@ async function wakeOpenClawAgent(eventType, context) {
 
 // Initialize bianca chatbot with shared Redis client
 biancaChatbot.init(redis);
+webhookStore.init(redis);
 const MILLIE_ACCOUNT_ID = 'acct_ebca85077e0a4b7da04cf14176466411';
 const MILLIE_USERNAME = 'milliexhart';
 const chatbotStats = { messagesReceived: 0, messagesSent: 0, ppvsSent: 0, errors: 0 };
@@ -2459,6 +2461,9 @@ app.post('/webhooks/onlyfans', async (req, res) => {
   console.log(`📨 Webhook received: event=${event}, account_id=${account_id}`);
   if (!event || !account_id) return;
 
+  // Archive EVERY webhook permanently
+  webhookStore.buffer(event, account_id, payload).catch(() => {});
+
   let username = accountIdToUsername[account_id];
   // Fallback: ensure millie always resolves even if map not built yet
   if (!username && account_id === MILLIE_ACCOUNT_ID) {
@@ -3616,6 +3621,17 @@ async function runBiancaBump() {
 cron.schedule('0 * * * *', runBiancaBump);
 
 // Bump API endpoints
+// Webhook archive status & manual flush
+app.get('/webhook-store/status', async (req, res) => {
+  const stats = webhookStore.getStats();
+  const bufferLen = await redis.llen('webhook:archive:buffer');
+  res.json({ ...stats, buffered: bufferLen });
+});
+app.post('/webhook-store/flush', async (req, res) => {
+  await webhookStore.flushToDrive();
+  res.json({ flushed: true });
+});
+
 app.get('/bump/status', (req, res) => {
   const now = new Date();
   const nextBump = new Date(now);
