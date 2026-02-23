@@ -867,8 +867,7 @@ cron.schedule('0 0 * * *', async () => {
 
 const PINNED_REDIS_KEY = 's4s:pinned-state';
 // Dynamic: floor(totalModels / 5) featured girls per day, each pinned to 5 pages
-const PINNED_ACCOUNTS_PER_GIRL = 5;
-// PINNED_FEATURED_PER_DAY is calculated dynamically in runPinnedPostRotation()
+const TARGET_DAILY_PINNED_POSTS = 50; // total posts budget — stays ~50 regardless of network size
 
 const PINNED_CAPTIONS = [
   "my girl 💕 go follow @{target} rn",
@@ -1005,8 +1004,10 @@ async function runPinnedPostRotation() {
   
   const pinnedState = await getPinnedState();
   
-  // Fixed 10 featured girls per day, skipping PROMOTER_ONLY if drawn
-  const PINNED_FEATURED_PER_DAY = 10;
+  // Dynamic: scale featured girls with network size, keep total posts ~50
+  const PINNED_FEATURED_PER_DAY = Math.max(1, Math.floor(targetableModels.length / 5));
+  const PINNED_ACCOUNTS_PER_GIRL = Math.max(1, Math.round(TARGET_DAILY_PINNED_POSTS / PINNED_FEATURED_PER_DAY));
+  console.log(`📌 Dynamic scaling: ${PINNED_FEATURED_PER_DAY} featured × ${PINNED_ACCOUNTS_PER_GIRL} promoters = ~${PINNED_FEATURED_PER_DAY * PINNED_ACCOUNTS_PER_GIRL} posts (${targetableModels.length} models)`);
   
   const dayIndex = pinnedState.dayIndex || 0;
   const startIdx = (dayIndex * PINNED_FEATURED_PER_DAY) % allModels.length;
@@ -3355,8 +3356,9 @@ app.get('/dashboard', async (req, res) => {
   res.json({
     config: {
       tagsPerModelPerDay: 57,
-      pinnedFeaturedPerDay: 10,
-      pinnedPromotersPerFeatured: PINNED_ACCOUNTS_PER_GIRL,
+      pinnedTargetDailyPosts: TARGET_DAILY_PINNED_POSTS,
+      pinnedFeaturedPerDay: Math.max(1, Math.floor(targetable.length / 5)),
+      pinnedPromotersPerFeatured: Math.max(1, Math.round(TARGET_DAILY_PINNED_POSTS / Math.max(1, Math.floor(targetable.length / 5)))),
       massDmWindowsPerDay: 12,
       promoterOnly: [...PROMOTER_ONLY],
     },
@@ -3376,7 +3378,7 @@ app.get('/dashboard', async (req, res) => {
       enabled: (await redis.get('s4s:pinned-enabled')) !== false,
       featuredToday: pinnedState.featuredGirls || [],
       dayIndex: pinnedState.dayIndex || 0,
-      totalDaysForFullRotation: Math.ceil(targetable.length / Math.floor(targetable.length / PINNED_ACCOUNTS_PER_GIRL)),
+      totalDaysForFullRotation: Math.ceil(targetable.length / Math.max(1, Math.floor(targetable.length / 5))),
       activePosts: (pinnedState.activePosts || []).length,
     },
     massDm: {
