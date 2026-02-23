@@ -1146,16 +1146,6 @@ async function cleanupExpiredPinnedPosts() {
   return { removed, expired: expired.length, remaining: remaining.length };
 }
 
-// Cleanup expired pinned posts every hour (active deletion after 24hr)
-cron.schedule('30 * * * *', async () => {
-  if (!isRunning) return;
-  try {
-    await cleanupExpiredPinnedPosts();
-  } catch (e) {
-    console.error('📌 Cleanup cron error:', e);
-  }
-});
-
 // Run pinned posts at 6am AST = 10:00 UTC
 cron.schedule('0 10 * * *', async () => {
   if (!isRunning) return;
@@ -1167,9 +1157,9 @@ cron.schedule('0 10 * * *', async () => {
     return;
   }
   
-  // Clean up yesterday's expired posts before creating new ones
+  // Delete yesterday's pinned posts before creating new ones
   try {
-    await cleanupExpiredPinnedPosts();
+    await removePinnedPosts();
   } catch (e) {
     console.error('📌 Pre-rotation cleanup failed:', e);
   }
