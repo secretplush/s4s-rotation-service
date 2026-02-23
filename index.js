@@ -3608,172 +3608,12 @@ app.get('/health', (req, res) => {
 
 const BIANCA_ACCOUNT_ID = 'acct_54e3119e77da4429b6537f7dd2883a05';
 const BIANCA_USER_ID = '525755724';
-const BIANCA_BUMP_EXCLUDE_IDS = [1231455148, 1232110158, 1258116798, 1232588865, 1254929574, 1265115686];
+// Old BIANCA_BUMP_EXCLUDE_IDS removed — all bump logic consolidated in standalone loop below
 
-const BIANCA_BUMP_PHOTOS_DEFAULT = ["4295115634", "4295115608", "4271207724", "4128847737", "4118094254", "4118094218", "4084333700", "4084332834", "4084332833", "4084332827", "4084332825", "4084332375", "4084332371", "4084332368", "4084332364", "4084331945", "4084331943", "4084331942", "4083927398", "4083927388", "4083927385", "4083927380", "4083927378", "4083927375"];
-
-const BIANCA_BUMP_MESSAGES = [
-  'heyyy u 💕 been thinking about u',
-  'bored and looking cute rn 😏 wanna see?',
-  'miss talking to u 🥺',
-  'just took this for u 📸',
-  'are u ignoring me 😤💕',
-  'pssst 😘',
-  'hiiii remember me? 🙈'
-];
-
-let biancaBumpState = {
-  enabled: true,
-  lastBumpTime: null,
-  lastPhotoUsed: null,
-  lastExclusions: [],
-};
-
-async function getBiancaBumpPhotos() {
-  try {
-    const photos = await redis.get('bianca:bumpPhotos');
-    if (photos && Array.isArray(photos) && photos.length > 0) return photos;
-  } catch (e) {
-    console.error('❌ Failed to load bump photos from Redis:', e.message);
-  }
-  // Initialize from default
-  await redis.set('bianca:bumpPhotos', BIANCA_BUMP_PHOTOS_DEFAULT);
-  return BIANCA_BUMP_PHOTOS_DEFAULT;
-}
-
-async function getActiveChatFanIds() {
-  try {
-    // First try Redis webhook data (zero OF API cost)
-    const redisKey = `webhook:active:${BIANCA_ACCOUNT_ID}`;
-    const twoHoursAgo = Date.now() - 2 * 60 * 60 * 1000;
-    const activeFromRedis = await redis.zrangebyscore(redisKey, twoHoursAgo, '+inf');
-    if (activeFromRedis && activeFromRedis.length > 0) {
-      const activeIds = activeFromRedis.map(id => Number(id));
-      console.log(`💬 Bianca bump: ${activeIds.length} active fans from Redis webhooks (zero API calls)`);
-      return activeIds;
-    }
-    
-    // Fallback to OF API if no webhook data yet
-    console.log('💬 Bianca bump: no Redis webhook data, falling back to OF API');
-    const res = await fetch(`${OF_API_BASE}/${BIANCA_ACCOUNT_ID}/chats?limit=50`, {
-      headers: { 'Authorization': `Bearer ${OF_API_KEY}` }
-    });
-    if (!res.ok) {
-      console.error('❌ Bianca bump: failed to fetch chats:', await res.text());
-      return [];
-    }
-    const data = await res.json();
-    const chats = data.data || data.list || data || [];
-    const activeIds = [];
-    for (const chat of chats) {
-      const lastMsgTime = chat.lastMessage?.createdAt || chat.updatedAt || chat.lastActivity;
-      if (lastMsgTime && new Date(lastMsgTime).getTime() > twoHoursAgo) {
-        const fanId = chat.withUser?.id || chat.userId || chat.user_id;
-        if (fanId) activeIds.push(Number(fanId));
-      }
-    }
-    console.log(`💬 Bianca bump: ${activeIds.length} fans with active chats (API fallback)`);
-    return activeIds;
-  } catch (e) {
-    console.error('❌ Bianca bump: chat fetch error:', e.message);
-    return [];
-  }
-}
-
-async function runBiancaBump() {
-  if (!biancaBumpState.enabled) {
-    console.log('📢 Bianca bump: disabled, skipping');
-    return;
-  }
-
-  console.log('📢 === BIANCA HOURLY BUMP ===');
-
-  try {
-    // 1. Delete previous bump
-    const prevQueueId = await redis.get('bianca:lastBumpQueueId');
-    if (prevQueueId) {
-      console.log(`📢 Deleting previous bump queue: ${prevQueueId}`);
-      try {
-        const delRes = await fetch(`${OF_API_BASE}/${BIANCA_ACCOUNT_ID}/mass-messaging/${prevQueueId}`, {
-          method: 'DELETE',
-          headers: { 'Authorization': `Bearer ${OF_API_KEY}` }
-        });
-        if (delRes.ok) {
-          console.log(`🗑️ Previous bump deleted: ${prevQueueId}`);
-        } else {
-          console.log(`⚠️ Previous bump delete returned ${delRes.status}: ${(await delRes.text()).slice(0, 100)}`);
-        }
-      } catch (e) {
-        console.error('❌ Failed to delete previous bump:', e.message);
-      }
-    }
-
-    // 2. Get active chat exclusions
-    const activeChatIds = await getActiveChatFanIds();
-    const allExcludeIds = [...BIANCA_BUMP_EXCLUDE_IDS, ...activeChatIds];
-
-    // 3. Pick random photo + message
-    const photos = await getBiancaBumpPhotos();
-    const photo = photos[Math.floor(Math.random() * photos.length)];
-    const message = BIANCA_BUMP_MESSAGES[Math.floor(Math.random() * BIANCA_BUMP_MESSAGES.length)];
-
-    // 4. Build excluded lists (SFS exclude for biancaawoods)
-    const excludedLists = [];
-    const sfsIds = sfsExcludeLists['biancaawoods'];
-    if (sfsIds) {
-      const ids = Array.isArray(sfsIds) ? sfsIds : [sfsIds];
-      for (const id of ids) excludedLists.push(Number(id));
-    }
-    const autoLists = excludeListIds['biancaawoods'] || {};
-    if (autoLists.newSub) excludedLists.push(Number(autoLists.newSub));
-    if (autoLists.activeChat) excludedLists.push(Number(autoLists.activeChat));
-
-    // 5. Send mass message
-    const body = {
-      text: message,
-      mediaFiles: [photo],
-      userLists: ['fans', 'following'],
-      ...(excludedLists.length > 0 ? { excludedLists } : {}),
-      ...(allExcludeIds.length > 0 ? { excludeUserIds: allExcludeIds } : {}),
-    };
-
-    console.log(`📢 Bianca bump: "${message}" | photo: ${photo} | excludeLists: ${excludedLists.length} | excludeUsers: ${allExcludeIds.length}`);
-
-    const res = await fetch(`${OF_API_BASE}/${BIANCA_ACCOUNT_ID}/mass-messaging`, {
-      method: 'POST',
-      headers: {
-        'Authorization': `Bearer ${OF_API_KEY}`,
-        'Content-Type': 'application/json',
-      },
-      body: JSON.stringify(body),
-    });
-
-    if (!res.ok) {
-      const err = await res.text();
-      console.error(`❌ Bianca bump send failed: ${err}`);
-      return;
-    }
-
-    const data = await res.json();
-    const queueId = data?.data?.[0]?.id || data?.id || null;
-
-    // 6. Store queue ID for next deletion
-    if (queueId) {
-      await redis.set('bianca:lastBumpQueueId', queueId);
-    }
-
-    biancaBumpState.lastBumpTime = new Date().toISOString();
-    biancaBumpState.lastPhotoUsed = photo;
-    biancaBumpState.lastExclusions = allExcludeIds;
-
-    console.log(`📢 Bianca bump sent! queue: ${queueId} | photo: ${photo} | msg: "${message}"`);
-  } catch (e) {
-    console.error('❌ Bianca bump error:', e.message);
-  }
-}
-
-// NOTE: Hourly bump cron removed here — handled by standalone bump loop at bottom of file
-// The runBiancaBump() above is kept for /bump/run manual trigger only
+// ═══════════════════════════════════════════════════════════════
+// BIANCA BUMP — SINGLE SYSTEM (all logic in standalone loop below)
+// API endpoints here just read/write Redis state used by that loop
+// ═══════════════════════════════════════════════════════════════
 
 // Webhook archive status & manual flush
 app.get('/webhook-store/status', async (req, res) => {
@@ -3786,65 +3626,58 @@ app.post('/webhook-store/flush', async (req, res) => {
   res.json({ flushed: true });
 });
 
-app.get('/bump/status', (req, res) => {
+app.get('/bump/status', async (req, res) => {
+  const state = await redis.get('bianca:bump_state') || {};
+  const enabled = await redis.get('bianca:bump_enabled');
   const now = new Date();
   const nextBump = new Date(now);
   nextBump.setMinutes(0, 0, 0);
   nextBump.setHours(nextBump.getHours() + 1);
-
   res.json({
-    enabled: biancaBumpState.enabled,
-    lastBumpTime: biancaBumpState.lastBumpTime,
-    lastPhotoUsed: biancaBumpState.lastPhotoUsed,
+    enabled: enabled !== false && enabled !== 'false',
+    lastBumpTime: state.lastBumpAt || null,
+    lastCaption: state.lastCaption || null,
+    lastMessageId: state.lastMessageId || null,
+    totalSent: state.totalSent || 0,
     nextBumpTime: nextBump.toISOString(),
-    activeChatExclusions: biancaBumpState.lastExclusions.length,
-    hardcodedExclusions: BIANCA_BUMP_EXCLUDE_IDS.length,
   });
 });
 
-app.post('/bump/enable', (req, res) => {
-  biancaBumpState.enabled = true;
+app.post('/bump/enable', async (req, res) => {
+  await redis.set('bianca:bump_enabled', true);
   console.log('📢 Bianca bump: ENABLED');
-  res.json({ enabled: true, message: 'Bianca bump enabled' });
+  res.json({ enabled: true });
 });
 
-app.post('/bump/disable', (req, res) => {
-  biancaBumpState.enabled = false;
+app.post('/bump/disable', async (req, res) => {
+  await redis.set('bianca:bump_enabled', false);
   console.log('📢 Bianca bump: DISABLED');
-  res.json({ enabled: false, message: 'Bianca bump disabled' });
+  res.json({ enabled: false });
 });
 
 app.get('/bump/photos', async (req, res) => {
-  const photos = await getBiancaBumpPhotos();
+  const photos = await redis.get('bianca:bumpPhotos') || [];
   res.json({ count: photos.length, photos });
 });
 
 app.post('/bump/photos', async (req, res) => {
   const { vaultId } = req.body;
   if (!vaultId) return res.status(400).json({ error: 'vaultId required' });
-  const photos = await getBiancaBumpPhotos();
+  let photos = await redis.get('bianca:bumpPhotos') || [];
   if (photos.includes(String(vaultId))) return res.json({ message: 'Already exists', count: photos.length, photos });
   photos.push(String(vaultId));
   await redis.set('bianca:bumpPhotos', photos);
-  console.log(`📢 Bianca bump: added photo ${vaultId} (total: ${photos.length})`);
   res.json({ added: vaultId, count: photos.length, photos });
 });
 
 app.delete('/bump/photos/:id', async (req, res) => {
   const { id } = req.params;
-  let photos = await getBiancaBumpPhotos();
+  let photos = await redis.get('bianca:bumpPhotos') || [];
   const before = photos.length;
   photos = photos.filter(p => p !== id);
   if (photos.length === before) return res.status(404).json({ error: 'Photo not found' });
   await redis.set('bianca:bumpPhotos', photos);
-  console.log(`📢 Bianca bump: removed photo ${id} (total: ${photos.length})`);
   res.json({ removed: id, count: photos.length, photos });
-});
-
-app.post('/bump/run', async (req, res) => {
-  console.log('📢 Manual Bianca bump trigger...');
-  await runBiancaBump();
-  res.json({ triggered: true, state: biancaBumpState });
 });
 
 // === VAULT ID TRACKING (prevent duplicate PPV sends) ===
@@ -4621,38 +4454,67 @@ app.listen(PORT, async () => {
   const BIANCA_BUMP_ACCOUNT = 'acct_54e3119e77da4429b6537f7dd2883a05';
   const BIANCA_BUMP_EXCLUDE_LISTS = [1231455148, 1232110158, 1258116798, 1232588865, 1254929574, 1265115686];
 
-  async function runBiancaBump() {
+  async function runBiancaBumpV2() {
     try {
-      console.log('📢 [bianca-bump] Running hourly bump...');
+      // Check enabled flag in Redis (API can toggle this)
+      const enabled = await redis.get('bianca:bump_enabled');
+      if (enabled === false || enabled === 'false') {
+        console.log('📢 [bianca-bump] DISABLED via Redis flag, skipping');
+        return;
+      }
+
+      console.log('📢 [bianca-bump] === HOURLY BUMP ===');
       const bumpState = await redis.get('bianca:bump_state') || {
         lastMessageId: null, recentCaptions: [], totalSent: 0
       };
 
-      // Delete previous bump message
+      // ── STEP 1: Delete ALL previous bumps ──
+      // Delete from bump_state (this system)
       if (bumpState.lastMessageId) {
         try {
           const delRes = await fetch(`${OF_API_BASE}/${BIANCA_BUMP_ACCOUNT}/mass-messaging/${bumpState.lastMessageId}`, {
             method: 'DELETE',
             headers: { 'Authorization': `Bearer ${OF_API_KEY}` }
           });
-          console.log(`🗑️ [bianca-bump] Deleted previous bump ${bumpState.lastMessageId}: ${delRes.status}`);
+          console.log(`🗑️ [bianca-bump] Deleted bump_state msg ${bumpState.lastMessageId}: ${delRes.status}`);
         } catch (e) {
-          console.log(`⚠️ [bianca-bump] Could not delete previous bump: ${e.message}`);
+          console.log(`⚠️ [bianca-bump] Could not delete bump_state msg: ${e.message}`);
         }
       }
+      // Also clean up legacy key from old system (belt + suspenders)
+      const legacyId = await redis.get('bianca:lastBumpQueueId');
+      if (legacyId && legacyId !== bumpState.lastMessageId) {
+        try {
+          const delRes = await fetch(`${OF_API_BASE}/${BIANCA_BUMP_ACCOUNT}/mass-messaging/${legacyId}`, {
+            method: 'DELETE',
+            headers: { 'Authorization': `Bearer ${OF_API_KEY}` }
+          });
+          console.log(`🗑️ [bianca-bump] Deleted legacy msg ${legacyId}: ${delRes.status}`);
+        } catch (e) {
+          console.log(`⚠️ [bianca-bump] Could not delete legacy msg: ${e.message}`);
+        }
+        await redis.del('bianca:lastBumpQueueId');
+      }
 
-      // Pick random photo + caption (avoid recent captions)
-      const photo = BIANCA_BUMP_PHOTOS[Math.floor(Math.random() * BIANCA_BUMP_PHOTOS.length)];
+      // ── STEP 2: Pick random photo + caption (avoid recent repeats) ──
+      let photos;
+      try {
+        photos = await redis.get('bianca:bumpPhotos');
+        if (!photos || !Array.isArray(photos) || photos.length === 0) photos = BIANCA_BUMP_PHOTOS;
+      } catch (e) { photos = BIANCA_BUMP_PHOTOS; }
+
+      const photo = photos[Math.floor(Math.random() * photos.length)];
       const recentSet = new Set(bumpState.recentCaptions || []);
       const availCaptions = BIANCA_BUMP_CAPTIONS.filter(c => !recentSet.has(c));
       const pool = availCaptions.length > 0 ? availCaptions : BIANCA_BUMP_CAPTIONS;
       const caption = pool[Math.floor(Math.random() * pool.length)];
 
-      // Get active chat fan IDs to exclude (fans chatting with bot in last 2 hours)
+      // ── STEP 3: Get active chat fan IDs to exclude ──
       const activeMembers = await redis.zrangebyscore(`webhook:active:${BIANCA_BUMP_ACCOUNT}`, Date.now() - 2 * 3600000, '+inf');
       const excludeUserIds = (activeMembers || []).map(Number).filter(n => !isNaN(n));
 
-      // Send free mass message
+      // ── STEP 4: Send ──
+      console.log(`📢 [bianca-bump] Sending: "${caption}" | photo: ${photo} | excludeLists: ${BIANCA_BUMP_EXCLUDE_LISTS.length} | excludeUsers: ${excludeUserIds.length}`);
       const sendRes = await fetch(`${OF_API_BASE}/${BIANCA_BUMP_ACCOUNT}/mass-messaging`, {
         method: 'POST',
         headers: { 'Authorization': `Bearer ${OF_API_KEY}`, 'Content-Type': 'application/json' },
@@ -4663,10 +4525,16 @@ app.listen(PORT, async () => {
           excludeUserIds: [...new Set(excludeUserIds)]
         })
       });
+
+      if (!sendRes.ok) {
+        console.error(`❌ [bianca-bump] Send failed: ${(await sendRes.text()).slice(0, 200)}`);
+        return;
+      }
+
       const sendData = await sendRes.json();
       const messageId = sendData?.data?.id || sendData?.id || sendData?.data?.[0]?.id || null;
 
-      // Save state
+      // ── STEP 5: Save state ──
       await redis.set('bianca:bump_state', {
         lastMessageId: messageId,
         lastBumpAt: new Date().toISOString(),
@@ -4675,13 +4543,13 @@ app.listen(PORT, async () => {
         totalSent: (bumpState.totalSent || 0) + 1
       });
 
-      console.log(`📢 [bianca-bump] Sent: "${caption}" (msg ${messageId}, excluded ${excludeUserIds.length} active fans)`);
+      console.log(`📢 [bianca-bump] ✅ Sent: "${caption}" (msg ${messageId}, excluded ${excludeUserIds.length} active fans)`);
     } catch (e) {
       console.error('❌ [bianca-bump] Error:', e.message);
     }
   }
 
-  // Run on the hour
-  cron.schedule('0 * * * *', runBiancaBump);
-  console.log('📢 [bianca-bump] Hourly bump loop started (standalone, no AI)');
+  // SINGLE cron — the ONLY bump trigger in the entire codebase
+  cron.schedule('0 * * * *', runBiancaBumpV2);
+  console.log('📢 [bianca-bump] Hourly bump loop started (SINGLE system, no duplicates)');
 });
