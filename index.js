@@ -626,6 +626,9 @@ async function _refreshAccountsCache() {
   });
   const accounts = await res.json();
   
+  // Detect username changes: compare previous id→username map with new data
+  const oldIdMap = accountIdToUsername || {};
+  
   const accountMap = {};
   const idMap = {};
   for (const acct of accounts) {
@@ -634,11 +637,95 @@ async function _refreshAccountsCache() {
       if (acct.id) idMap[acct.id] = acct.onlyfans_username;
     }
   }
+  
+  // Auto-migrate Redis data if any username changed
+  for (const [acctId, newUsername] of Object.entries(idMap)) {
+    const oldUsername = oldIdMap[acctId];
+    if (oldUsername && oldUsername !== newUsername) {
+      console.log(`🔄 USERNAME CHANGE DETECTED: @${oldUsername} → @${newUsername} (${acctId})`);
+      try {
+        await migrateUsernameData(oldUsername, newUsername);
+      } catch (e) {
+        console.error(`🔄 Migration failed for ${oldUsername} → ${newUsername}:`, e);
+      }
+    }
+  }
+  
   _modelAccountsCache = accountMap;
   accountIdToUsername = idMap;
   _modelAccountsCacheTs = Date.now();
   console.log(`📋 Refreshed accounts cache: ${Object.keys(accountMap).length} accounts`);
   return accountMap;
+}
+
+async function migrateUsernameData(oldName, newName) {
+  // Migrate vault_mappings (v1): rename top-level key + target references
+  const v1 = await redis.get('vault_mappings') || {};
+  let v1Changed = false;
+  if (v1[oldName]) {
+    v1[newName] = v1[oldName];
+    delete v1[oldName];
+    v1Changed = true;
+  }
+  // Also update target references inside other models' mappings
+  for (const [promoter, targets] of Object.entries(v1)) {
+    if (targets[oldName]) {
+      targets[newName] = targets[oldName];
+      delete targets[oldName];
+      v1Changed = true;
+    }
+  }
+  if (v1Changed) await redis.set('vault_mappings', v1);
+  
+  // Migrate vault_mappings_v2
+  const v2 = await redis.get('vault_mappings_v2') || {};
+  let v2Changed = false;
+  if (v2[oldName]) {
+    v2[newName] = v2[oldName];
+    delete v2[oldName];
+    v2Changed = true;
+  }
+  for (const [promoter, targets] of Object.entries(v2)) {
+    if (targets[oldName]) {
+      targets[newName] = targets[oldName];
+      delete targets[oldName];
+      v2Changed = true;
+    }
+  }
+  if (v2Changed) {
+    await redis.set('vault_mappings_v2', v2);
+    cachedVaultMappingsV2 = null; // bust cache
+  }
+  
+  // Migrate exclude lists
+  const excludeKeys = ['s4s:exclude', 's4s:exclude-lists', 's4s:new-sub-exclude'];
+  for (const prefix of excludeKeys) {
+    const oldData = await redis.get(`${prefix}:${oldName}`);
+    if (oldData) {
+      await redis.set(`${prefix}:${newName}`, oldData);
+      await redis.del(`${prefix}:${oldName}`);
+    }
+  }
+  
+  // Migrate pin history references
+  const pinHistory = await redis.get('s4s:pin-history') || {};
+  let pinChanged = false;
+  if (pinHistory[oldName]) {
+    pinHistory[newName] = pinHistory[oldName];
+    delete pinHistory[oldName];
+    pinChanged = true;
+  }
+  // Update promoter references inside arrays
+  for (const [featured, promoters] of Object.entries(pinHistory)) {
+    const idx = promoters.indexOf(oldName);
+    if (idx !== -1) {
+      promoters[idx] = newName;
+      pinChanged = true;
+    }
+  }
+  if (pinChanged) await redis.set('s4s:pin-history', pinHistory);
+  
+  console.log(`🔄 Migrated all data: @${oldName} → @${newName}`);
 }
 
 async function loadModelAccounts(forceRefresh = false) {
