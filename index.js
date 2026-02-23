@@ -3608,7 +3608,7 @@ app.get('/health', (req, res) => {
 
 const BIANCA_ACCOUNT_ID = 'acct_54e3119e77da4429b6537f7dd2883a05';
 const BIANCA_USER_ID = '525755724';
-const BIANCA_BUMP_EXCLUDE_IDS = [1231455148, 1232110158, 1258116798, 1232588865, 1254929574];
+const BIANCA_BUMP_EXCLUDE_IDS = [1231455148, 1232110158, 1258116798, 1232588865, 1254929574, 1265115686];
 
 const BIANCA_BUMP_PHOTOS_DEFAULT = ["4295115634", "4295115608", "4271207724", "4128847737", "4118094254", "4118094218", "4084333700", "4084332834", "4084332833", "4084332827", "4084332825", "4084332375", "4084332371", "4084332368", "4084332364", "4084331945", "4084331943", "4084331942", "4083927398", "4083927388", "4083927385", "4083927380", "4083927378", "4083927375"];
 
@@ -3772,10 +3772,9 @@ async function runBiancaBump() {
   }
 }
 
-// Cron: every hour at :00
-cron.schedule('0 * * * *', runBiancaBump);
+// NOTE: Hourly bump cron removed here — handled by standalone bump loop at bottom of file
+// The runBiancaBump() above is kept for /bump/run manual trigger only
 
-// Bump API endpoints
 // Webhook archive status & manual flush
 app.get('/webhook-store/status', async (req, res) => {
   const stats = webhookStore.getStats();
