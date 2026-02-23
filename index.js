@@ -1116,6 +1116,46 @@ async function removePinnedPosts() {
   return { removed, total: posts.length };
 }
 
+// Remove pinned posts older than 24 hours (active cleanup, doesn't rely on OF expiry)
+async function cleanupExpiredPinnedPosts() {
+  const pinnedState = await getPinnedState();
+  const posts = pinnedState.activePosts || [];
+  if (posts.length === 0) return { removed: 0, remaining: 0 };
+  
+  const now = Date.now();
+  const TWENTY_FOUR_HOURS = 24 * 60 * 60 * 1000;
+  const expired = posts.filter(p => (now - p.createdAt) >= TWENTY_FOUR_HOURS);
+  const remaining = posts.filter(p => (now - p.createdAt) < TWENTY_FOUR_HOURS);
+  
+  if (expired.length === 0) {
+    console.log(`📌 Cleanup: no expired pinned posts (${remaining.length} still active)`);
+    return { removed: 0, remaining: remaining.length };
+  }
+  
+  let removed = 0;
+  for (const post of expired) {
+    const success = await deletePost(post.postId, post.accountId);
+    if (success) removed++;
+    await new Promise(r => setTimeout(r, 1000));
+  }
+  
+  pinnedState.activePosts = remaining;
+  await savePinnedState(pinnedState);
+  
+  console.log(`📌 Cleanup: deleted ${removed}/${expired.length} expired pinned posts, ${remaining.length} still active`);
+  return { removed, expired: expired.length, remaining: remaining.length };
+}
+
+// Cleanup expired pinned posts every hour (active deletion after 24hr)
+cron.schedule('30 * * * *', async () => {
+  if (!isRunning) return;
+  try {
+    await cleanupExpiredPinnedPosts();
+  } catch (e) {
+    console.error('📌 Cleanup cron error:', e);
+  }
+});
+
 // Run pinned posts at 6am AST = 10:00 UTC
 cron.schedule('0 10 * * *', async () => {
   if (!isRunning) return;
@@ -1125,6 +1165,13 @@ cron.schedule('0 10 * * *', async () => {
   if (pinnedEnabled === false) {
     console.log('📌 Pinned posts disabled, skipping');
     return;
+  }
+  
+  // Clean up yesterday's expired posts before creating new ones
+  try {
+    await cleanupExpiredPinnedPosts();
+  } catch (e) {
+    console.error('📌 Pre-rotation cleanup failed:', e);
   }
   
   // Stagger start by 0-2 min random offset to avoid predictability
@@ -3420,6 +3467,12 @@ app.post('/pinned/run', async (req, res) => {
 app.post('/pinned/remove', async (req, res) => {
   console.log('📌 Manual pinned post removal...');
   const result = await removePinnedPosts();
+  res.json(result);
+});
+
+app.post('/pinned/cleanup', async (req, res) => {
+  console.log('📌 Manual expired pinned post cleanup...');
+  const result = await cleanupExpiredPinnedPosts();
   res.json(result);
 });
 
