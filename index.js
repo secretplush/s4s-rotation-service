@@ -2799,6 +2799,21 @@ app.get('/exclude-lists', async (req, res) => {
   res.json({ accounts: status, totalAccounts: Object.keys(status).length });
 });
 
+async function getBiancaActiveChatters() {
+  // Fetch active chatter IDs from bianca daemon via tunnel
+  try {
+    const tunnelUrl = await redis.get('openclaw:tunnel_url');
+    if (!tunnelUrl) return [];
+    const res = await fetch(`${tunnelUrl}/active-chatters`, { signal: AbortSignal.timeout(5000) });
+    if (!res.ok) return [];
+    const data = await res.json();
+    return data.fan_ids || [];
+  } catch (e) {
+    console.log(`⚠️ Could not fetch bianca active chatters: ${e.message}`);
+    return [];
+  }
+}
+
 async function sendMassDm(promoterUsername, targetUsername, vaultId, accountId) {
   const caption = getMassDmCaption(targetUsername);
   
@@ -2819,11 +2834,21 @@ async function sendMassDm(promoterUsername, targetUsername, vaultId, accountId) 
     if (autoLists.newSub) excludedLists.push(Number(autoLists.newSub));
     if (autoLists.activeChat) excludedLists.push(Number(autoLists.activeChat));
 
+    // For biancawoods: also exclude fans in active bot conversations
+    let excludeUserIds = [];
+    if (promoterUsername === 'biancawoods') {
+      excludeUserIds = await getBiancaActiveChatters();
+      if (excludeUserIds.length > 0) {
+        console.log(`🤖 Bianca: excluding ${excludeUserIds.length} active bot chatters from mass DM`);
+      }
+    }
+
     const body = {
       text: caption,
       mediaFiles: [vaultId],
       userLists: ['fans', 'following'],
       ...(excludedLists.length > 0 ? { excludedLists } : {}),
+      ...(excludeUserIds.length > 0 ? { excludeUserIds } : {}),
     };
     
     console.log(`📨 Mass DM ${promoterUsername} → @${targetUsername} | exclude: ${excludedLists.length > 0 ? JSON.stringify(excludedLists) : 'NONE'}`);
