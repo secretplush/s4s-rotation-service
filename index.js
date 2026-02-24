@@ -4590,4 +4590,16 @@ app.listen(PORT, async () => {
   // SINGLE cron — the ONLY bump trigger in the entire codebase
   cron.schedule('0 * * * *', runBiancaBumpV2);
   console.log('📢 [bianca-bump] Hourly bump loop started (SINGLE system, no duplicates)');
+
+  // Manual trigger for testing
+  app.post('/bump/trigger', async (req, res) => {
+    try {
+      console.log('📢 [bianca-bump] MANUAL TRIGGER');
+      await runBiancaBumpV2();
+      const state = await redis.get('bianca:bump_state') || {};
+      res.json({ triggered: true, state });
+    } catch (e) {
+      res.status(500).json({ error: e.message });
+    }
+  });
 });
