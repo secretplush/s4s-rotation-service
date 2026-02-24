@@ -4559,6 +4559,7 @@ app.listen(PORT, async () => {
         body: JSON.stringify({
           text: caption,
           mediaFiles: [photo],
+          groups: ["fans", "following"],
           excludeListIds: BIANCA_BUMP_EXCLUDE_LISTS,
           excludeUserIds: [...new Set(excludeUserIds)]
         })
