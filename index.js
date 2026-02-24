@@ -3656,7 +3656,6 @@ app.post('/bump/disable', async (req, res) => {
 });
 
 // Manage active chatter exclusions for bumps
-const BIANCA_ACCOUNT_ID = 'acct_54e3119e77da4429b6537f7dd2883a05';
 app.post('/bump/exclude', async (req, res) => {
   try {
     const { fanIds } = req.body;
