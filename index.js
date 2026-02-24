@@ -3656,11 +3656,12 @@ app.post('/bump/disable', async (req, res) => {
 });
 
 // Manage active chatter exclusions for bumps
+const BIANCA_ACCOUNT_ID = 'acct_54e3119e77da4429b6537f7dd2883a05';
 app.post('/bump/exclude', async (req, res) => {
   try {
     const { fanIds } = req.body;
     if (!fanIds || !Array.isArray(fanIds)) return res.status(400).json({ error: 'fanIds array required' });
-    const key = `webhook:active:${BIANCA_BUMP_ACCOUNT}`;
+    const key = `webhook:active:${BIANCA_ACCOUNT_ID}`;
     const now = Date.now();
     for (const fid of fanIds) {
       await redis.zadd(key, { score: now, member: String(fid) });
@@ -3673,7 +3674,7 @@ app.post('/bump/exclude', async (req, res) => {
 
 app.get('/bump/exclude', async (req, res) => {
   try {
-    const key = `webhook:active:${BIANCA_BUMP_ACCOUNT}`;
+    const key = `webhook:active:${BIANCA_ACCOUNT_ID}`;
     const cutoff = Date.now() - 2 * 3600000;
     const active = await redis.zrange(key, cutoff, '+inf', { byScore: true });
     res.json({ count: active.length, fanIds: active.map(Number) });
@@ -3684,7 +3685,7 @@ app.delete('/bump/exclude', async (req, res) => {
   try {
     const { fanIds } = req.body;
     if (!fanIds || !Array.isArray(fanIds)) return res.status(400).json({ error: 'fanIds array required' });
-    const key = `webhook:active:${BIANCA_BUMP_ACCOUNT}`;
+    const key = `webhook:active:${BIANCA_ACCOUNT_ID}`;
     for (const fid of fanIds) {
       await redis.zrem(key, String(fid));
     }
@@ -4548,7 +4549,7 @@ app.listen(PORT, async () => {
       const caption = pool[Math.floor(Math.random() * pool.length)];
 
       // ── STEP 3: Get active chat fan IDs to exclude ──
-      const activeMembers = await redis.zrange(`webhook:active:${BIANCA_BUMP_ACCOUNT}`, Date.now() - 2 * 3600000, '+inf', { byScore: true });
+      const activeMembers = await redis.zrange(`webhook:active:${BIANCA_ACCOUNT_ID}`, Date.now() - 2 * 3600000, '+inf', { byScore: true });
       const excludeUserIds = (activeMembers || []).map(Number).filter(n => !isNaN(n));
 
       // ── STEP 4: Send ──
