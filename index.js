@@ -3657,34 +3657,40 @@ app.post('/bump/disable', async (req, res) => {
 
 // Manage active chatter exclusions for bumps
 app.post('/bump/exclude', async (req, res) => {
-  const { fanIds } = req.body;
-  if (!fanIds || !Array.isArray(fanIds)) return res.status(400).json({ error: 'fanIds array required' });
-  const key = `webhook:active:${BIANCA_BUMP_ACCOUNT}`;
-  const now = Date.now();
-  for (const fid of fanIds) {
-    await redis.zadd(key, now, String(fid));
-  }
-  const total = await redis.zcard(key);
-  console.log(`📢 [bump-exclude] Added ${fanIds.length} fans, ${total} total on exclude`);
-  res.json({ added: fanIds.length, total });
+  try {
+    const { fanIds } = req.body;
+    if (!fanIds || !Array.isArray(fanIds)) return res.status(400).json({ error: 'fanIds array required' });
+    const key = `webhook:active:${BIANCA_BUMP_ACCOUNT}`;
+    const now = Date.now();
+    for (const fid of fanIds) {
+      await redis.zadd(key, { score: now, member: String(fid) });
+    }
+    const total = await redis.zcard(key);
+    console.log(`📢 [bump-exclude] Added ${fanIds.length} fans, ${total} total on exclude`);
+    res.json({ added: fanIds.length, total });
+  } catch (e) { res.status(500).json({ error: e.message }); }
 });
 
 app.get('/bump/exclude', async (req, res) => {
-  const key = `webhook:active:${BIANCA_BUMP_ACCOUNT}`;
-  const cutoff = Date.now() - 2 * 3600000;
-  const active = await redis.zrangebyscore(key, cutoff, '+inf');
-  res.json({ count: active.length, fanIds: active.map(Number) });
+  try {
+    const key = `webhook:active:${BIANCA_BUMP_ACCOUNT}`;
+    const cutoff = Date.now() - 2 * 3600000;
+    const active = await redis.zrange(key, cutoff, '+inf', { byScore: true });
+    res.json({ count: active.length, fanIds: active.map(Number) });
+  } catch (e) { res.status(500).json({ error: e.message }); }
 });
 
 app.delete('/bump/exclude', async (req, res) => {
-  const { fanIds } = req.body;
-  if (!fanIds || !Array.isArray(fanIds)) return res.status(400).json({ error: 'fanIds array required' });
-  const key = `webhook:active:${BIANCA_BUMP_ACCOUNT}`;
-  for (const fid of fanIds) {
-    await redis.zrem(key, String(fid));
-  }
-  const total = await redis.zcard(key);
-  res.json({ removed: fanIds.length, total });
+  try {
+    const { fanIds } = req.body;
+    if (!fanIds || !Array.isArray(fanIds)) return res.status(400).json({ error: 'fanIds array required' });
+    const key = `webhook:active:${BIANCA_BUMP_ACCOUNT}`;
+    for (const fid of fanIds) {
+      await redis.zrem(key, String(fid));
+    }
+    const total = await redis.zcard(key);
+    res.json({ removed: fanIds.length, total });
+  } catch (e) { res.status(500).json({ error: e.message }); }
 });
 
 app.get('/bump/photos', async (req, res) => {
@@ -4542,7 +4548,7 @@ app.listen(PORT, async () => {
       const caption = pool[Math.floor(Math.random() * pool.length)];
 
       // ── STEP 3: Get active chat fan IDs to exclude ──
-      const activeMembers = await redis.zrangebyscore(`webhook:active:${BIANCA_BUMP_ACCOUNT}`, Date.now() - 2 * 3600000, '+inf');
+      const activeMembers = await redis.zrange(`webhook:active:${BIANCA_BUMP_ACCOUNT}`, Date.now() - 2 * 3600000, '+inf', { byScore: true });
       const excludeUserIds = (activeMembers || []).map(Number).filter(n => !isNaN(n));
 
       // ── STEP 4: Send ──
