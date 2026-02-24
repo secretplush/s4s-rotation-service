@@ -4591,15 +4591,22 @@ app.listen(PORT, async () => {
   cron.schedule('0 * * * *', runBiancaBumpV2);
   console.log('📢 [bianca-bump] Hourly bump loop started (SINGLE system, no duplicates)');
 
-  // Manual trigger for testing
+  // Manual trigger for testing — returns detailed log
   app.post('/bump/trigger', async (req, res) => {
+    const logs = [];
+    const origLog = console.log;
+    const origErr = console.error;
+    console.log = (...args) => { logs.push(args.join(' ')); origLog(...args); };
+    console.error = (...args) => { logs.push('ERROR: ' + args.join(' ')); origErr(...args); };
     try {
-      console.log('📢 [bianca-bump] MANUAL TRIGGER');
       await runBiancaBumpV2();
       const state = await redis.get('bianca:bump_state') || {};
-      res.json({ triggered: true, state });
+      res.json({ triggered: true, state, logs });
     } catch (e) {
-      res.status(500).json({ error: e.message });
+      res.status(500).json({ error: e.message, stack: e.stack, logs });
+    } finally {
+      console.log = origLog;
+      console.error = origErr;
     }
   });
 });
