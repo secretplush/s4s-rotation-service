@@ -745,6 +745,49 @@ async function loadModelAccounts(forceRefresh = false) {
 // Models that promote others but are NEVER tagged/promoted themselves (no promo image)
 const PROMOTER_ONLY = new Set(['taylorskully']);
 
+/**
+ * Filter vault mappings to ONLY include models connected in the OF API.
+ * This is the single gate that prevents stale/disconnected models from being rotated.
+ */
+async function filterToConnectedModels(vaultMappings) {
+  try {
+    const accounts = await getModelAccounts();
+    const connectedUsernames = new Set(Object.keys(accounts));
+    if (connectedUsernames.size === 0) {
+      console.warn('⚠️ OF API returned 0 accounts — skipping filter to avoid wiping rotation');
+      return vaultMappings;
+    }
+    const filtered = {};
+    let dropped = [];
+    for (const model of Object.keys(vaultMappings)) {
+      if (connectedUsernames.has(model)) {
+        // Also filter targets to only connected models
+        const targets = vaultMappings[model];
+        if (typeof targets === 'object' && !Array.isArray(targets)) {
+          const filteredTargets = {};
+          for (const [target, vaultId] of Object.entries(targets)) {
+            if (connectedUsernames.has(target) || PROMOTER_ONLY.has(model)) {
+              filteredTargets[target] = vaultId;
+            }
+          }
+          filtered[model] = filteredTargets;
+        } else {
+          filtered[model] = targets;
+        }
+      } else {
+        dropped.push(model);
+      }
+    }
+    if (dropped.length > 0) {
+      console.log(`🚫 Filtered out ${dropped.length} disconnected models: ${dropped.join(', ')}`);
+    }
+    return filtered;
+  } catch (e) {
+    console.error('⚠️ filterToConnectedModels failed, using unfiltered:', e.message);
+    return vaultMappings;
+  }
+}
+
 function generateDailySchedule(models, vaultMappings) {
   const schedule = {};
   const now = Date.now();
@@ -942,7 +985,7 @@ cron.schedule('* * * * *', async () => {
 cron.schedule('0 0 * * *', async () => {
   if (!isRunning) return;
   console.log('🔄 Regenerating daily schedule...');
-  const vaultMappings = await loadVaultMappings();
+  const vaultMappings = await filterToConnectedModels(await loadVaultMappings());
   const models = Object.keys(vaultMappings);
   rotationState.dailySchedule = generateDailySchedule(models, vaultMappings);
 });
@@ -1078,7 +1121,7 @@ async function createPinnedPost(promoterAccountId, targetUsername, vaultId) {
 async function runPinnedPostRotation() {
   console.log('📌 === PINNED POST ROTATION ===');
   
-  const vaultMappings = await loadVaultMappings();
+  const vaultMappings = await filterToConnectedModels(await loadVaultMappings());
   const accountMap = await loadModelAccounts();
   const allModels = Object.keys(vaultMappings).sort();
   // Models eligible to be FEATURED (promoted) — exclude promoter-only models
@@ -1326,7 +1369,7 @@ function getMassDmCaption(targetUsername) {
 async function generateMassDmSchedule() {
   console.log('📨 Generating mass DM schedule...');
   
-  const vaultMappings = await loadVaultMappings();
+  const vaultMappings = await filterToConnectedModels(await loadVaultMappings());
   const allModels = Object.keys(vaultMappings).sort();
   
   if (allModels.length < 2) {
@@ -3270,7 +3313,8 @@ async function startupRecovery() {
     isRunning = true;
     rotationState.stats.startedAt = new Date().toISOString();
     
-    const vaultMappings = await loadVaultMappings();
+    const rawVaultMappings = await loadVaultMappings();
+    const vaultMappings = await filterToConnectedModels(rawVaultMappings);
     const models = Object.keys(vaultMappings);
     rotationState.dailySchedule = generateDailySchedule(models, vaultMappings);
     
@@ -3303,8 +3347,9 @@ app.post('/start', async (req, res) => {
   // Process any overdue deletes first
   await processOverdueDeletes();
   
-  // Generate initial schedule
-  const vaultMappings = await loadVaultMappings();
+  // Generate initial schedule — filtered to OF API connected accounts only
+  const rawVaultMappings = await loadVaultMappings();
+  const vaultMappings = await filterToConnectedModels(rawVaultMappings);
   const models = Object.keys(vaultMappings);
   rotationState.dailySchedule = generateDailySchedule(models, vaultMappings);
   
@@ -3436,7 +3481,7 @@ app.get('/stats', async (req, res) => {
 
 // Full dashboard data — single source of truth for the S4S app
 app.get('/dashboard', async (req, res) => {
-  const vaultMappings = await loadVaultMappings();
+  const vaultMappings = await filterToConnectedModels(await loadVaultMappings());
   const allModels = Object.keys(vaultMappings).sort();
   const targetable = allModels.filter(m => !PROMOTER_ONLY.has(m));
   const pinnedState = await getPinnedState();
@@ -3591,7 +3636,7 @@ app.post('/pinned/disable', async (req, res) => {
 app.post('/api/regenerate-schedule', async (req, res) => {
   try {
     console.log('🔄 Manual schedule regeneration triggered');
-    const vaultMappings = await loadVaultMappings();
+    const vaultMappings = await filterToConnectedModels(await loadVaultMappings());
     const models = Object.keys(vaultMappings);
     rotationState.dailySchedule = generateDailySchedule(models, vaultMappings);
     res.json({ success: true, models: models.length, message: 'Schedule regenerated' });
