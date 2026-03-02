@@ -751,7 +751,7 @@ const PROMOTER_ONLY = new Set(['taylorskully']);
  */
 async function filterToConnectedModels(vaultMappings) {
   try {
-    const accounts = await getModelAccounts();
+    const accounts = await loadModelAccounts();
     const connectedUsernames = new Set(Object.keys(accounts));
     if (connectedUsernames.size === 0) {
       console.warn('⚠️ OF API returned 0 accounts — skipping filter to avoid wiping rotation');
