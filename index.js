@@ -991,6 +991,14 @@ function onDeleteFailure(postId, accountId, reason) {
     DELETE_CIRCUIT_BREAKER.trippedAt = new Date().toISOString();
     isRunning = false;
     redis.set('s4s:rotation-enabled', false).catch(() => {});
+    
+    // Alert Kiefer via Telegram
+    const alertMsg = `🛑 S4S CIRCUIT BREAKER TRIPPED\n\n${DELETE_CIRCUIT_BREAKER.consecutiveFailures} consecutive delete failures — rotation auto-stopped.\n\nLast failure: post ${postId} on ${accountId}\nReason: ${reason}\n\nNo new posts will be created until manually restarted. Tell the OF API crew.`;
+    fetch(`https://api.telegram.org/bot${process.env.TELEGRAM_BOT_TOKEN}/sendMessage`, {
+      method: 'POST',
+      headers: { 'Content-Type': 'application/json' },
+      body: JSON.stringify({ chat_id: process.env.TELEGRAM_ALERT_CHAT_ID || '5505937268', text: alertMsg })
+    }).catch(e => console.error('Failed to send Telegram alert:', e));
   }
 }
 
