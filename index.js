@@ -3206,6 +3206,7 @@ async function _processMassDmScheduleInner() {
             queueId: queueId || null,
             sentAt: entry.sentAt,
             success: true,
+            autoUnsend: PROMOTER_ONLY.has(model),  // flag for auto-cleanup
           });
           // Keep last 500 entries
           await redis.set('s4s:mass-dm-sent', sentLog.slice(-500));
@@ -3258,6 +3259,47 @@ cron.schedule('0 0 * * *', async () => {
   const enabled = await redis.get('s4s:mass-dm-enabled');
   if (enabled === false) return;
   await generateMassDmSchedule();
+});
+
+// Auto-unsend mass DMs from promoter-only models after ~55 minutes
+cron.schedule('*/5 * * * *', async () => {
+  try {
+    const sentLog = await redis.get('s4s:mass-dm-sent') || [];
+    const now = Date.now();
+    const toUnsend = sentLog.filter(e => 
+      e.autoUnsend && e.success && e.queueId && e.accountId && !e.unsent &&
+      (now - new Date(e.sentAt).getTime()) > 55 * 60 * 1000  // older than 55 min
+    );
+    
+    if (toUnsend.length === 0) return;
+    
+    let unsent = 0;
+    for (const entry of toUnsend) {
+      try {
+        const delRes = await fetch(`${OF_API_BASE}/${entry.accountId}/mass-messaging/${entry.queueId}`, {
+          method: 'DELETE',
+          headers: { 'Authorization': `Bearer ${OF_API_KEY}` }
+        });
+        if (delRes.ok || delRes.status === 404) {
+          entry.unsent = true;
+          entry.unsentAt = new Date().toISOString();
+          unsent++;
+        } else {
+          console.error(`⚠️ Auto-unsend failed ${entry.queueId}: ${delRes.status}`);
+        }
+      } catch (e) {
+        console.error(`⚠️ Auto-unsend error ${entry.queueId}:`, e.message);
+      }
+      await new Promise(r => setTimeout(r, 500));
+    }
+    
+    if (unsent > 0) {
+      await redis.set('s4s:mass-dm-sent', sentLog.slice(-500));
+      console.log(`🗑️ Auto-unsent ${unsent} mass DMs from promoter-only models`);
+    }
+  } catch (e) {
+    console.error('❌ Auto-unsend cron error:', e);
+  }
 });
 
 // === MASS DM ENDPOINTS ===
