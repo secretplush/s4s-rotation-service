@@ -448,9 +448,11 @@ let rotationState = {
   lastTagTime: {},
   executedTags: [],
   dailySchedule: {},
+  deleteLatencies: [], // Track last 50 delete latencies for avg calculation
   stats: {
     totalTags: 0,
     totalDeletes: 0,
+    totalDeleteFailures: 0,
     startedAt: null,
   }
 };
@@ -581,6 +583,17 @@ async function processOverdueDeletes() {
         successIds.push(result.value.postId);
         processed++;
         rotationState.stats.totalDeletes++;
+        
+        // Track delete latency (post lifetime = now - createdAt)
+        const del = batch.find(d => d.postId === result.value.postId);
+        if (del && del.createdAt) {
+          const latencyMs = Date.now() - del.createdAt;
+          rotationState.deleteLatencies.push(latencyMs);
+          // Keep only last 50 entries
+          if (rotationState.deleteLatencies.length > 50) {
+            rotationState.deleteLatencies = rotationState.deleteLatencies.slice(-50);
+          }
+        }
       }
     }
     
@@ -983,6 +996,9 @@ async function deletePost(postId, accountId) {
 function onDeleteFailure(postId, accountId, reason) {
   DELETE_CIRCUIT_BREAKER.consecutiveFailures++;
   DELETE_CIRCUIT_BREAKER.lastFailure = { postId, accountId, reason, ts: new Date().toISOString() };
+  
+  // Increment delete failure counter
+  rotationState.stats.totalDeleteFailures++;
   
   console.error(`🚨 Delete failure #${DELETE_CIRCUIT_BREAKER.consecutiveFailures}/${DELETE_CIRCUIT_BREAKER.threshold}: post ${postId} on ${accountId} — ${reason}`);
   
@@ -3564,6 +3580,13 @@ app.get('/stats', async (req, res) => {
   const pinnedState = await getPinnedState();
   const pinnedEnabled = await redis.get('s4s:pinned-enabled');
   
+  // Calculate average delete latency (in seconds)
+  let avgDeleteLatency = null;
+  if (rotationState.deleteLatencies && rotationState.deleteLatencies.length > 0) {
+    const avgMs = rotationState.deleteLatencies.reduce((sum, latency) => sum + latency, 0) / rotationState.deleteLatencies.length;
+    avgDeleteLatency = Math.round(avgMs / 1000); // Convert to seconds
+  }
+  
   // Mass DM stats
   const massDmEnabled = await redis.get('s4s:mass-dm-enabled');
   const massDmData = await redis.get('s4s:mass-dm-schedule');
@@ -3585,6 +3608,7 @@ app.get('/stats', async (req, res) => {
     stats: rotationState.stats,
     modelsActive: Object.keys(rotationState.dailySchedule).length,
     pendingDeletes: pending.length,
+    avgDeleteLatency,
     massDm: {
       enabled: massDmEnabled !== false,
       todaySent: massDmSent,
