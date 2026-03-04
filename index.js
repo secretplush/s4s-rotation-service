@@ -455,6 +455,14 @@ let rotationState = {
   }
 };
 
+// Delete circuit breaker — auto-stop if deletes keep failing
+const DELETE_CIRCUIT_BREAKER = {
+  consecutiveFailures: 0,
+  threshold: 3,  // stop after 3 consecutive real failures
+  lastFailure: null,
+  trippedAt: null,
+};
+
 // Ghost captions
 const GHOST_CAPTIONS = [
   "obsessed with her 🥹💕 @{target}",
@@ -548,22 +556,56 @@ async function removePendingDelete(postId) {
 async function processOverdueDeletes() {
   const now = Date.now();
   const pending = await getPendingDeletes();
-  let processed = 0;
+  const overdue = pending.filter(del => now >= del.deleteAt);
   
-  for (const del of pending) {
-    if (now >= del.deleteAt) {
-      console.log(`🗑️ Processing overdue delete: ${del.postId} (was due ${Math.round((now - del.deleteAt) / 1000)}s ago)`);
-      const success = await deletePost(del.postId, del.accountId);
-      if (success) {
-        await removePendingDelete(del.postId);
-        rotationState.stats.totalDeletes++;
+  if (overdue.length === 0) return 0;
+  
+  console.log(`🗑️ Processing ${overdue.length} overdue deletes in parallel batches...`);
+  
+  // Process in parallel batches of 20 — each delete hits a different OF account
+  const BATCH_SIZE = 20;
+  let processed = 0;
+  const successIds = [];
+  
+  for (let i = 0; i < overdue.length; i += BATCH_SIZE) {
+    const batch = overdue.slice(i, i + BATCH_SIZE);
+    const results = await Promise.allSettled(
+      batch.map(async (del) => {
+        const success = await deletePost(del.postId, del.accountId);
+        return { postId: del.postId, success };
+      })
+    );
+    
+    for (const result of results) {
+      if (result.status === 'fulfilled' && result.value.success) {
+        successIds.push(result.value.postId);
         processed++;
+        rotationState.stats.totalDeletes++;
+      }
+    }
+    
+    // Small delay between batches to be safe
+    if (i + BATCH_SIZE < overdue.length) {
+      await new Promise(r => setTimeout(r, 500));
+    }
+  }
+  
+  // Batch-remove all successful deletes from Redis in one operation
+  if (successIds.length > 0) {
+    try {
+      const remaining = pending.filter(p => !successIds.includes(p.postId));
+      await redis.set(REDIS_KEYS.PENDING_DELETES, remaining);
+    } catch (e) {
+      console.error('Failed to batch-remove pending deletes:', e);
+      // Fallback: remove one by one
+      for (const id of successIds) {
+        await removePendingDelete(id);
       }
     }
   }
   
   if (processed > 0) {
-    console.log(`✅ Processed ${processed} overdue deletes`);
+    console.log(`✅ Processed ${processed}/${overdue.length} overdue deletes (${overdue.length - processed} failed)`);
   }
   return processed;
 }
@@ -792,21 +834,39 @@ function generateDailySchedule(models, vaultMappings) {
   const schedule = {};
   const now = Date.now();
   
+  // EQUAL PROMOTION: Track how many times each target is assigned globally
+  const targetableModels = models.filter(m => !PROMOTER_ONLY.has(m));
+  const globalTargetCount = {};
+  for (const t of targetableModels) globalTargetCount[t] = 0;
+  
   for (const model of models) {
     // Filter targets: exclude promoter-only models (they have no image to tag with)
     const allTargets = Object.keys(vaultMappings[model] || {});
-    const targets = allTargets.filter(t => !PROMOTER_ONLY.has(t));
+    const targets = allTargets.filter(t => !PROMOTER_ONLY.has(t) && t !== model);
     if (targets.length === 0) continue;
     
-    const shuffledTargets = [...targets].sort(() => Math.random() - 0.5);
     const tagsPerDay = 57;
     const baseInterval = (24 * 60 * 60 * 1000) / tagsPerDay; // ~25.3 min
+    
+    // Build target list using LEAST-PROMOTED-FIRST strategy
+    // Each tag slot picks the target with the lowest global count (among this model's available targets)
+    const orderedTargets = [];
+    for (let i = 0; i < tagsPerDay; i++) {
+      // Sort available targets by global count (ascending), break ties randomly
+      const sorted = [...targets].sort((a, b) => {
+        const diff = (globalTargetCount[a] || 0) - (globalTargetCount[b] || 0);
+        return diff !== 0 ? diff : Math.random() - 0.5;
+      });
+      const picked = sorted[0];
+      orderedTargets.push(picked);
+      globalTargetCount[picked] = (globalTargetCount[picked] || 0) + 1;
+    }
     
     schedule[model] = [];
     let currentTime = now + (1 + Math.random() * 4) * 60 * 1000;
     
     for (let i = 0; i < tagsPerDay; i++) {
-      const target = shuffledTargets[i % shuffledTargets.length];
+      const target = orderedTargets[i];
       const jitter = (Math.random() - 0.5) * 6 * 60 * 1000;
       const scheduledTime = currentTime + jitter;
       
@@ -876,20 +936,61 @@ async function deletePost(postId, accountId) {
     
     if (res.ok) {
       console.log(`🗑️ Deleted post ${postId}`);
+      DELETE_CIRCUIT_BREAKER.consecutiveFailures = 0; // reset on success
       return true;
     } else {
       const err = await res.text();
       // If post is already deleted/not found, treat as success
-      if (res.status === 404 || err.includes('not found') || err.includes('already deleted')) {
-        console.log(`🗑️ Post ${postId} already deleted, cleaning up`);
+      if (res.status === 404 || err.includes('not found') || err.includes('already deleted') 
+          || err.includes('Post not found')) {
+        console.log(`🗑️ Post ${postId} already deleted (${res.status}), cleaning up`);
+        DELETE_CIRCUIT_BREAKER.consecutiveFailures = 0;
         return true;
       }
+      // 500 Server Error — verify if post actually still exists before treating as failure
+      if (res.status === 500) {
+        try {
+          const checkRes = await fetch(`${OF_API_BASE}/${accountId}/posts/${postId}`, {
+            headers: { 'Authorization': `Bearer ${OF_API_KEY}` }
+          });
+          const checkData = await checkRes.json();
+          if (!checkData?.data?.id) {
+            console.log(`🗑️ Post ${postId} confirmed gone after 500, cleaning up`);
+            DELETE_CIRCUIT_BREAKER.consecutiveFailures = 0;
+            return true;
+          }
+          console.error(`❌ Post ${postId} still exists after delete 500 — real failure`);
+          onDeleteFailure(postId, accountId, `500 — post still exists`);
+          return false;
+        } catch (checkErr) {
+          console.error(`Failed to verify post ${postId}:`, checkErr);
+          onDeleteFailure(postId, accountId, `500 + verify error: ${checkErr}`);
+          return false;
+        }
+      }
       console.error(`Failed to delete post ${postId}:`, err);
+      onDeleteFailure(postId, accountId, `${res.status}: ${err}`);
       return false;
     }
   } catch (e) {
     console.error(`Error deleting post ${postId}:`, e);
+    onDeleteFailure(postId, accountId, `Exception: ${e}`);
     return false;
+  }
+}
+
+// Circuit breaker: track delete failures, auto-stop rotation if threshold hit
+function onDeleteFailure(postId, accountId, reason) {
+  DELETE_CIRCUIT_BREAKER.consecutiveFailures++;
+  DELETE_CIRCUIT_BREAKER.lastFailure = { postId, accountId, reason, ts: new Date().toISOString() };
+  
+  console.error(`🚨 Delete failure #${DELETE_CIRCUIT_BREAKER.consecutiveFailures}/${DELETE_CIRCUIT_BREAKER.threshold}: post ${postId} on ${accountId} — ${reason}`);
+  
+  if (DELETE_CIRCUIT_BREAKER.consecutiveFailures >= DELETE_CIRCUIT_BREAKER.threshold) {
+    console.error(`🛑 CIRCUIT BREAKER TRIPPED — ${DELETE_CIRCUIT_BREAKER.consecutiveFailures} consecutive delete failures. Auto-stopping rotation to prevent orphaned posts.`);
+    DELETE_CIRCUIT_BREAKER.trippedAt = new Date().toISOString();
+    isRunning = false;
+    redis.set('s4s:rotation-enabled', false).catch(() => {});
   }
 }
 
@@ -981,13 +1082,35 @@ cron.schedule('* * * * *', async () => {
   }
 });
 
-// Regenerate daily schedule at midnight
+// Regenerate daily schedule at midnight — with vault health check
 cron.schedule('0 0 * * *', async () => {
   if (!isRunning) return;
   console.log('🔄 Regenerating daily schedule...');
   const vaultMappings = await filterToConnectedModels(await loadVaultMappings());
   const models = Object.keys(vaultMappings);
-  rotationState.dailySchedule = generateDailySchedule(models, vaultMappings);
+  
+  // Vault health check: flag models with < 90% target completeness
+  const expectedTargets = models.filter(m => !PROMOTER_ONLY.has(m)).length - 1;
+  const unhealthy = [];
+  for (const model of models) {
+    const targets = Object.keys(vaultMappings[model] || {}).filter(t => !PROMOTER_ONLY.has(t));
+    const completeness = targets.length / expectedTargets;
+    if (completeness < 0.9) {
+      unhealthy.push({ model, targets: targets.length, expected: expectedTargets, pct: Math.round(completeness * 100) });
+    }
+  }
+  
+  if (unhealthy.length > 0) {
+    const alertMsg = unhealthy.map(u => `${u.model}: ${u.targets}/${u.expected} (${u.pct}%)`).join(', ');
+    console.warn(`⚠️ VAULT HEALTH: ${unhealthy.length} unhealthy models skipped from rotation: ${alertMsg}`);
+    // Remove unhealthy models from rotation
+    const healthyModels = models.filter(m => !unhealthy.find(u => u.model === m));
+    rotationState.dailySchedule = generateDailySchedule(healthyModels, vaultMappings);
+    rotationState.vaultHealthAlert = { unhealthy, checkedAt: Date.now() };
+  } else {
+    rotationState.dailySchedule = generateDailySchedule(models, vaultMappings);
+    rotationState.vaultHealthAlert = null;
+  }
 });
 
 // === PINNED POST SYSTEM ===
@@ -3475,7 +3598,14 @@ app.get('/stats', async (req, res) => {
       target: p.target,
       deleteAt: new Date(p.deleteAt).toISOString(),
       overdueBy: Math.max(0, Math.round((Date.now() - p.deleteAt) / 1000))
-    }))
+    })),
+    vaultHealthAlert: rotationState.vaultHealthAlert || null,
+    deleteCircuitBreaker: {
+      consecutiveFailures: DELETE_CIRCUIT_BREAKER.consecutiveFailures,
+      threshold: DELETE_CIRCUIT_BREAKER.threshold,
+      trippedAt: DELETE_CIRCUIT_BREAKER.trippedAt,
+      lastFailure: DELETE_CIRCUIT_BREAKER.lastFailure,
+    }
   });
 });
 
