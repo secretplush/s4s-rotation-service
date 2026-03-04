@@ -858,8 +858,8 @@ function generateDailySchedule(models, vaultMappings) {
     const targets = allTargets.filter(t => !PROMOTER_ONLY.has(t) && t !== model);
     if (targets.length === 0) continue;
     
-    const tagsPerDay = 57;
-    const baseInterval = (24 * 60 * 60 * 1000) / tagsPerDay; // ~25.3 min
+    const tagsPerDay = PROMOTER_ONLY.has(model) ? 120 : 57;
+    const baseInterval = (24 * 60 * 60 * 1000) / tagsPerDay;
     
     // Build target list using LEAST-PROMOTED-FIRST strategy
     // Each tag slot picks the target with the lowest global count (among this model's available targets)
@@ -1530,18 +1530,25 @@ async function generateMassDmSchedule() {
   const now = new Date();
   const todayStr = now.toISOString().slice(0, 10);
   
-  // Build target assignments per model (12 targets each)
+  // Promoter-only models get DOUBLE windows (every hour = 24/day)
+  const PROMOTER_ONLY_DM_WINDOWS = [];
+  for (let h = 0; h < 24; h++) {
+    PROMOTER_ONLY_DM_WINDOWS.push({ startHour: h });
+  }
+  
+  // Build target assignments per model
   // Promoter-only models can SEND mass DMs but are never promoted as targets
   const modelTargets = {};
   for (const model of allModels) {
     const others = allModels.filter(m => m !== model && !PROMOTER_ONLY.has(m));
+    const windowCount = PROMOTER_ONLY.has(model) ? PROMOTER_ONLY_DM_WINDOWS.length : MASS_DM_WINDOWS_UTC.length;
     const recentlyPromoted = new Set(history[model] || []);
     const fresh = others.filter(m => !recentlyPromoted.has(m));
     const stale = others.filter(m => recentlyPromoted.has(m));
     const shuffledFresh = fresh.sort(() => Math.random() - 0.5);
     const shuffledStale = stale.sort(() => Math.random() - 0.5);
     const pool = [...shuffledFresh, ...shuffledStale];
-    const targets = pool.slice(0, MASS_DM_WINDOWS_UTC.length);
+    const targets = pool.slice(0, windowCount);
     
     const prevHistory = history[model] || [];
     history[model] = [...targets, ...prevHistory].slice(0, others.length);
@@ -1553,38 +1560,56 @@ async function generateMassDmSchedule() {
   const intervalMinutes = 60 / allModels.length;
   const schedule = {};
   
-  // Shuffle model order for each window so the same model isn't always first
+  // Build schedule for regular models (12 windows)
+  const shuffleArray = arr => [...arr].sort(() => Math.random() - 0.5);
+  
   for (let windowIdx = 0; windowIdx < MASS_DM_WINDOWS_UTC.length; windowIdx++) {
     const window = MASS_DM_WINDOWS_UTC[windowIdx];
-    const shuffledModels = [...allModels].sort(() => Math.random() - 0.5);
+    const regularModels = allModels.filter(m => !PROMOTER_ONLY.has(m));
+    const shuffledModels = shuffleArray(regularModels);
+    const regularInterval = 60 / regularModels.length;
     
     for (let modelIdx = 0; modelIdx < shuffledModels.length; modelIdx++) {
       const model = shuffledModels[modelIdx];
       const target = modelTargets[model]?.[windowIdx];
       if (!target) continue;
       
-      // Space evenly: model 0 at :00, model 1 at :02, model 2 at :04, etc.
-      const offsetMinutes = Math.round(modelIdx * intervalMinutes);
-      
+      const offsetMinutes = Math.round(modelIdx * regularInterval);
       const scheduled = new Date(now);
       scheduled.setUTCHours(window.startHour, offsetMinutes, 0, 0);
-      
-      // Windows 0 and 2 (startHour 0, 2) are actually next UTC day for AST evening
-      if (window.startHour < 4) {
-        scheduled.setUTCDate(scheduled.getUTCDate() + 1);
-      }
+      if (window.startHour < 4) scheduled.setUTCDate(scheduled.getUTCDate() + 1);
       
       const vaultId = vaultMappings[model]?.[target];
-      
       if (!schedule[model]) schedule[model] = [];
       schedule[model].push({
-        target,
-        windowIndex: windowIdx,
+        target, windowIndex: windowIdx,
         scheduledTime: scheduled.toISOString(),
         vaultId: vaultId || null,
-        executed: false,
-        failed: false,
-        sentAt: null,
+        executed: false, failed: false, sentAt: null,
+      });
+    }
+  }
+  
+  // Build schedule for promoter-only models (24 windows — every hour)
+  for (const model of allModels.filter(m => PROMOTER_ONLY.has(m))) {
+    for (let windowIdx = 0; windowIdx < PROMOTER_ONLY_DM_WINDOWS.length; windowIdx++) {
+      const window = PROMOTER_ONLY_DM_WINDOWS[windowIdx];
+      const target = modelTargets[model]?.[windowIdx];
+      if (!target) continue;
+      
+      // Schedule at a random minute within the hour
+      const offsetMinutes = Math.floor(Math.random() * 50);
+      const scheduled = new Date(now);
+      scheduled.setUTCHours(window.startHour, offsetMinutes, 0, 0);
+      if (window.startHour < 4) scheduled.setUTCDate(scheduled.getUTCDate() + 1);
+      
+      const vaultId = vaultMappings[model]?.[target];
+      if (!schedule[model]) schedule[model] = [];
+      schedule[model].push({
+        target, windowIndex: windowIdx,
+        scheduledTime: scheduled.toISOString(),
+        vaultId: vaultId || null,
+        executed: false, failed: false, sentAt: null,
       });
     }
   }
