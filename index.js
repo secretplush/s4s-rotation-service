@@ -858,7 +858,7 @@ function generateDailySchedule(models, vaultMappings) {
     const targets = allTargets.filter(t => !PROMOTER_ONLY.has(t) && t !== model);
     if (targets.length === 0) continue;
     
-    const tagsPerDay = PROMOTER_ONLY.has(model) ? 120 : 57;
+    const tagsPerDay = PROMOTER_ONLY.has(model) ? 240 : 57;
     const baseInterval = (24 * 60 * 60 * 1000) / tagsPerDay;
     
     // Build target list using LEAST-PROMOTED-FIRST strategy
