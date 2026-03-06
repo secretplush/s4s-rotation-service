@@ -798,7 +798,10 @@ async function loadModelAccounts(forceRefresh = false) {
 }
 
 // Models that promote others but are NEVER tagged/promoted themselves (no promo image)
-const PROMOTER_ONLY = new Set(['taylorskully', 'jennaamitchell']);
+const PROMOTER_ONLY = new Set(['taylorskully']);
+
+// Models that promote others but are never promoted/tagged THEMSELVES (regular schedule, not boosted like PROMOTER_ONLY)
+const NO_PROMOTE = new Set(['jennaamitchell']);
 
 // Per-promoter exclusions: key = promoter, value = Set of models that should NEVER be promoted on their page
 const EXCLUDE_TARGETS = {
@@ -853,7 +856,7 @@ function generateDailySchedule(models, vaultMappings) {
   const now = Date.now();
   
   // EQUAL PROMOTION: Track how many times each target is assigned globally
-  const targetableModels = models.filter(m => !PROMOTER_ONLY.has(m));
+  const targetableModels = models.filter(m => !PROMOTER_ONLY.has(m) && !NO_PROMOTE.has(m));
   const globalTargetCount = {};
   for (const t of targetableModels) globalTargetCount[t] = 0;
   
@@ -861,7 +864,7 @@ function generateDailySchedule(models, vaultMappings) {
     // Filter targets: exclude promoter-only models (they have no image to tag with)
     const allTargets = Object.keys(vaultMappings[model] || {});
     const excludeSet = EXCLUDE_TARGETS[model] || new Set();
-    const targets = allTargets.filter(t => !PROMOTER_ONLY.has(t) && t !== model && !excludeSet.has(t));
+    const targets = allTargets.filter(t => !PROMOTER_ONLY.has(t) && !NO_PROMOTE.has(t) && t !== model && !excludeSet.has(t));
     if (targets.length === 0) continue;
     
     const tagsPerDay = PROMOTER_ONLY.has(model) ? 240 : 57;
@@ -1120,10 +1123,10 @@ cron.schedule('0 0 * * *', async () => {
   const models = Object.keys(vaultMappings);
   
   // Vault health check: flag models with < 90% target completeness
-  const expectedTargets = models.filter(m => !PROMOTER_ONLY.has(m)).length - 1;
+  const expectedTargets = models.filter(m => !PROMOTER_ONLY.has(m) && !NO_PROMOTE.has(m)).length - 1;
   const unhealthy = [];
   for (const model of models) {
-    const targets = Object.keys(vaultMappings[model] || {}).filter(t => !PROMOTER_ONLY.has(t));
+    const targets = Object.keys(vaultMappings[model] || {}).filter(t => !PROMOTER_ONLY.has(t) && !NO_PROMOTE.has(t));
     const completeness = targets.length / expectedTargets;
     if (completeness < 0.9) {
       unhealthy.push({ model, targets: targets.length, expected: expectedTargets, pct: Math.round(completeness * 100) });
@@ -1278,7 +1281,7 @@ async function runPinnedPostRotation() {
   const accountMap = await loadModelAccounts();
   const allModels = Object.keys(vaultMappings).sort();
   // Models eligible to be FEATURED (promoted) — exclude promoter-only models
-  const targetableModels = allModels.filter(m => !PROMOTER_ONLY.has(m));
+  const targetableModels = allModels.filter(m => !PROMOTER_ONLY.has(m) && !NO_PROMOTE.has(m));
   
   if (allModels.length === 0) {
     console.log('❌ No models with vault mappings');
@@ -1298,7 +1301,7 @@ async function runPinnedPostRotation() {
   while (featuredGirls.length < PINNED_FEATURED_PER_DAY && cursor < allModels.length) {
     const candidate = allModels[(startIdx + cursor) % allModels.length];
     cursor++;
-    if (PROMOTER_ONLY.has(candidate)) continue; // skip promoter-only models
+    if (PROMOTER_ONLY.has(candidate) || NO_PROMOTE.has(candidate)) continue; // skip promoter-only and no-promote models
     featuredGirls.push(candidate);
   }
   
@@ -1547,7 +1550,7 @@ async function generateMassDmSchedule() {
   const modelTargets = {};
   for (const model of allModels) {
     const modelExclude = EXCLUDE_TARGETS[model] || new Set();
-    const others = allModels.filter(m => m !== model && !PROMOTER_ONLY.has(m) && !modelExclude.has(m));
+    const others = allModels.filter(m => m !== model && !PROMOTER_ONLY.has(m) && !NO_PROMOTE.has(m) && !modelExclude.has(m));
     const windowCount = PROMOTER_ONLY.has(model) ? PROMOTER_ONLY_DM_WINDOWS.length : MASS_DM_WINDOWS_UTC.length;
     const recentlyPromoted = new Set(history[model] || []);
     const fresh = others.filter(m => !recentlyPromoted.has(m));
@@ -3743,7 +3746,7 @@ app.get('/stats', async (req, res) => {
 app.get('/dashboard', async (req, res) => {
   const vaultMappings = await filterToConnectedModels(await loadVaultMappings());
   const allModels = Object.keys(vaultMappings).sort();
-  const targetable = allModels.filter(m => !PROMOTER_ONLY.has(m));
+  const targetable = allModels.filter(m => !PROMOTER_ONLY.has(m) && !NO_PROMOTE.has(m));
   const pinnedState = await getPinnedState();
   const massDmData = await redis.get('s4s:mass-dm-schedule');
   
@@ -3781,6 +3784,7 @@ app.get('/dashboard', async (req, res) => {
       total: allModels.length,
       targetable: targetable.length,
       promoterOnly: [...PROMOTER_ONLY].filter(m => allModels.includes(m)),
+      noPromote: [...NO_PROMOTE].filter(m => allModels.includes(m)),
       list: allModels,
     },
     ghostTags: {
