@@ -1650,7 +1650,7 @@ const SFS_EXCLUDE_LISTS_HARDCODED = {
   "sadieeblake": ["1262020580"],
   "lolasinclairr": ["1261988697", "1256700311"],
   "maddieharperr": ["1256821855"],
-  "zoeemonroe": ["1262020818", "1257390577"],
+  "zoeemonroe": ["1262020818"],
   "biancaawoods": ["1261988726"],
   "aviannaarose": ["1256700115"],
   "andreaelizabethxo": ["1262454105", "1260567928"],
