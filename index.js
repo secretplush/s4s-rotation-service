@@ -1062,7 +1062,7 @@ async function runRotationCycle() {
           const archiveRes = await fetch(`${OF_API_BASE}/${del.accountId}/posts/${del.postId}/archive`, {
             method: 'POST',
             headers: { 'Authorization': `Bearer ${OF_API_KEY}`, 'Content-Type': 'application/json' },
-            body: '{}'
+            body: JSON.stringify({ private_archive: true })
           });
           success = archiveRes.ok || archiveRes.status === 404;
           console.log(`📦 Archived (paid page) post ${del.postId} for ${promoter}: ${archiveRes.status}`);
