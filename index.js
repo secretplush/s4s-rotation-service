@@ -1062,7 +1062,7 @@ async function runRotationCycle() {
             headers: { 'Authorization': `Bearer ${OF_API_KEY}`, 'Content-Type': 'application/json' },
             body: JSON.stringify({ private_archive: true })
           });
-          success = archiveRes.ok || archiveRes.status === 404;
+          success = archiveRes.ok || archiveRes.status === 404 || archiveRes.status === 400; // 400 = already archived
           console.log(`📦 Archived (paid page) post ${del.postId} for ${promoter}: ${archiveRes.status}`);
           if (success) DELETE_CIRCUIT_BREAKER.consecutiveFailures = 0;
         } catch (e) {
