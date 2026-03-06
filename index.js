@@ -1045,9 +1045,36 @@ async function runRotationCycle() {
   // ALWAYS process pending deletes first (from Redis)
   const pending = await getPendingDeletes();
   
+  // Build reverse lookup: accountId → promoter username
+  const accountToModel = {};
+  for (const [model, acctId] of Object.entries(accountMap)) {
+    accountToModel[acctId] = model;
+  }
+  
   for (const del of pending) {
     if (now >= del.deleteAt) {
-      const success = await deletePost(del.postId, del.accountId);
+      const promoter = del.promoter || accountToModel[del.accountId] || '';
+      let success;
+      
+      // For paid pages (NO_GHOST_TAGS), archive instead of delete
+      if (NO_GHOST_TAGS.has(promoter)) {
+        try {
+          const archiveRes = await fetch(`${OF_API_BASE}/${del.accountId}/posts/${del.postId}/archive`, {
+            method: 'POST',
+            headers: { 'Authorization': `Bearer ${OF_API_KEY}`, 'Content-Type': 'application/json' },
+            body: '{}'
+          });
+          success = archiveRes.ok || archiveRes.status === 404;
+          console.log(`📦 Archived (paid page) post ${del.postId} for ${promoter}: ${archiveRes.status}`);
+          if (success) DELETE_CIRCUIT_BREAKER.consecutiveFailures = 0;
+        } catch (e) {
+          console.error(`Failed to archive ${del.postId}:`, e.message);
+          success = false;
+        }
+      } else {
+        success = await deletePost(del.postId, del.accountId);
+      }
+      
       if (success) {
         await removePendingDelete(del.postId);
         rotationState.stats.totalDeletes++;
