@@ -803,6 +803,9 @@ const PROMOTER_ONLY = new Set(['taylorskully']);
 // Models that promote others but are never promoted/tagged THEMSELVES (regular schedule, not boosted like PROMOTER_ONLY)
 const NO_PROMOTE = new Set(['jennaamitchell']);
 
+// Models that should NEVER do ghost tags (paid pages have OF delete limits). Mass DMs only.
+const NO_GHOST_TAGS = new Set(['jennaamitchell']);
+
 // Per-promoter exclusions: key = promoter, value = Set of models that should NEVER be promoted on their page
 const EXCLUDE_TARGETS = {
   'jennaamitchell': new Set(['brookeewest']),
@@ -861,6 +864,9 @@ function generateDailySchedule(models, vaultMappings) {
   for (const t of targetableModels) globalTargetCount[t] = 0;
   
   for (const model of models) {
+    // Skip models that can't do ghost tags (paid pages have OF delete limits)
+    if (NO_GHOST_TAGS.has(model)) continue;
+    
     // Filter targets: exclude promoter-only models (they have no image to tag with)
     const allTargets = Object.keys(vaultMappings[model] || {});
     const excludeSet = EXCLUDE_TARGETS[model] || new Set();
@@ -1318,7 +1324,7 @@ async function runPinnedPostRotation() {
   for (const featured of featuredGirls) {
     // Get available promoters (not the featured girl herself, and not already assigned today)
     const usedPromoters = new Set(activePosts.map(p => p.promoter));
-    const available = allOtherModels.filter(m => m !== featured && !usedPromoters.has(m) && !(EXCLUDE_TARGETS[m] && EXCLUDE_TARGETS[m].has(featured)));
+    const available = allOtherModels.filter(m => m !== featured && !usedPromoters.has(m) && !NO_GHOST_TAGS.has(m) && !(EXCLUDE_TARGETS[m] && EXCLUDE_TARGETS[m].has(featured)));
     
     // Sort: prioritize accounts that HAVEN'T promoted this girl recently
     const recentPromoters = new Set(pinHistory[featured] || []);
