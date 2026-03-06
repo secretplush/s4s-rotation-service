@@ -803,8 +803,8 @@ const PROMOTER_ONLY = new Set(['taylorskully']);
 // Models that promote others but are never promoted/tagged THEMSELVES (regular schedule, not boosted like PROMOTER_ONLY)
 const NO_PROMOTE = new Set(['jennaamitchell']);
 
-// Models that should NEVER do ghost tags (paid pages have OF delete limits). Mass DMs only.
-const NO_GHOST_TAGS = new Set(['jennaamitchell']);
+// Models that use ARCHIVE instead of DELETE for ghost tags (paid pages have OF delete limits)
+const ARCHIVE_INSTEAD_OF_DELETE = new Set(['jennaamitchell']);
 
 // Per-promoter exclusions: key = promoter, value = Set of models that should NEVER be promoted on their page
 const EXCLUDE_TARGETS = {
@@ -865,8 +865,6 @@ function generateDailySchedule(models, vaultMappings) {
   
   for (const model of models) {
     // Skip models that can't do ghost tags (paid pages have OF delete limits)
-    if (NO_GHOST_TAGS.has(model)) continue;
-    
     // Filter targets: exclude promoter-only models (they have no image to tag with)
     const allTargets = Object.keys(vaultMappings[model] || {});
     const excludeSet = EXCLUDE_TARGETS[model] || new Set();
@@ -1056,8 +1054,8 @@ async function runRotationCycle() {
       const promoter = del.promoter || accountToModel[del.accountId] || '';
       let success;
       
-      // For paid pages (NO_GHOST_TAGS), archive instead of delete
-      if (NO_GHOST_TAGS.has(promoter)) {
+      // For paid pages (ARCHIVE_INSTEAD_OF_DELETE), private archive instead of delete
+      if (ARCHIVE_INSTEAD_OF_DELETE.has(promoter)) {
         try {
           const archiveRes = await fetch(`${OF_API_BASE}/${del.accountId}/posts/${del.postId}/archive`, {
             method: 'POST',
@@ -1351,7 +1349,7 @@ async function runPinnedPostRotation() {
   for (const featured of featuredGirls) {
     // Get available promoters (not the featured girl herself, and not already assigned today)
     const usedPromoters = new Set(activePosts.map(p => p.promoter));
-    const available = allOtherModels.filter(m => m !== featured && !usedPromoters.has(m) && !NO_GHOST_TAGS.has(m) && !(EXCLUDE_TARGETS[m] && EXCLUDE_TARGETS[m].has(featured)));
+    const available = allOtherModels.filter(m => m !== featured && !usedPromoters.has(m) && !(EXCLUDE_TARGETS[m] && EXCLUDE_TARGETS[m].has(featured)));
     
     // Sort: prioritize accounts that HAVEN'T promoted this girl recently
     const recentPromoters = new Set(pinHistory[featured] || []);
