@@ -798,7 +798,12 @@ async function loadModelAccounts(forceRefresh = false) {
 }
 
 // Models that promote others but are NEVER tagged/promoted themselves (no promo image)
-const PROMOTER_ONLY = new Set(['taylorskully']);
+const PROMOTER_ONLY = new Set(['taylorskully', 'jennaamitchell']);
+
+// Per-promoter exclusions: key = promoter, value = Set of models that should NEVER be promoted on their page
+const EXCLUDE_TARGETS = {
+  'jennaamitchell': new Set(['brookeewest']),
+};
 
 /**
  * Filter vault mappings to ONLY include models connected in the OF API.
@@ -855,7 +860,8 @@ function generateDailySchedule(models, vaultMappings) {
   for (const model of models) {
     // Filter targets: exclude promoter-only models (they have no image to tag with)
     const allTargets = Object.keys(vaultMappings[model] || {});
-    const targets = allTargets.filter(t => !PROMOTER_ONLY.has(t) && t !== model);
+    const excludeSet = EXCLUDE_TARGETS[model] || new Set();
+    const targets = allTargets.filter(t => !PROMOTER_ONLY.has(t) && t !== model && !excludeSet.has(t));
     if (targets.length === 0) continue;
     
     const tagsPerDay = PROMOTER_ONLY.has(model) ? 240 : 57;
@@ -1309,7 +1315,7 @@ async function runPinnedPostRotation() {
   for (const featured of featuredGirls) {
     // Get available promoters (not the featured girl herself, and not already assigned today)
     const usedPromoters = new Set(activePosts.map(p => p.promoter));
-    const available = allOtherModels.filter(m => m !== featured && !usedPromoters.has(m));
+    const available = allOtherModels.filter(m => m !== featured && !usedPromoters.has(m) && !(EXCLUDE_TARGETS[m] && EXCLUDE_TARGETS[m].has(featured)));
     
     // Sort: prioritize accounts that HAVEN'T promoted this girl recently
     const recentPromoters = new Set(pinHistory[featured] || []);
@@ -1540,7 +1546,8 @@ async function generateMassDmSchedule() {
   // Promoter-only models can SEND mass DMs but are never promoted as targets
   const modelTargets = {};
   for (const model of allModels) {
-    const others = allModels.filter(m => m !== model && !PROMOTER_ONLY.has(m));
+    const modelExclude = EXCLUDE_TARGETS[model] || new Set();
+    const others = allModels.filter(m => m !== model && !PROMOTER_ONLY.has(m) && !modelExclude.has(m));
     const windowCount = PROMOTER_ONLY.has(model) ? PROMOTER_ONLY_DM_WINDOWS.length : MASS_DM_WINDOWS_UTC.length;
     const recentlyPromoted = new Set(history[model] || []);
     const fresh = others.filter(m => !recentlyPromoted.has(m));
