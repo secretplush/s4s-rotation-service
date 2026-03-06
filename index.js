@@ -3642,6 +3642,17 @@ app.get('/schedule', (req, res) => {
   });
 });
 
+app.get('/debug/exclude-lists', async (req, res) => {
+  const model = req.query.model;
+  if (model) {
+    const sfs = sfsExcludeLists[model] || null;
+    const auto = excludeListIds[model] || null;
+    res.json({ model, sfsExcludeLists: sfs, autoExcludeLists: auto });
+  } else {
+    res.json({ sfsExcludeLists, autoExcludeLists: excludeListIds });
+  }
+});
+
 app.get('/stats', async (req, res) => {
   const pending = await getPendingDeletes();
   const pinnedState = await getPinnedState();
