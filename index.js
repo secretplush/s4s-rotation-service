@@ -1676,10 +1676,10 @@ const SFS_EXCLUDE_LISTS_HARDCODED = {
   "oliviabrookess": ["1262454505"],
   "chloecookk": ["1262454515", "1260547948"],
   "ayaaann": ["1262454532", "1256700684"],
-  "itstaylorbrooke": ["1263113220", "1263002461"],
+  "itstaylorbrooke": ["1263002461"],
   "juliaabrooks": ["1262696979"],
   "isabelleegracee": ["1262696966", "1225239940"],
-  "sarakinsley": ["1263113230", "1263001724"],
+  "sarakinsley": ["1263001724"],
   "sophiamurphy": ["1262696990"],
   "camilaxcruz": ["1262696992"],
   "itsskylarrae": ["1262696995"],
@@ -1692,6 +1692,13 @@ let sfsExcludeLists = { ...SFS_EXCLUDE_LISTS_HARDCODED };
 async function loadSfsExcludeLists() {
   try {
     // Force re-seed if data is old format (v2 = multi-list arrays)
+    const forceReseed = await redis.get('sfs_exclude_lists_force_reseed');
+    if (forceReseed) {
+      await redis.del('sfs_exclude_lists_force_reseed');
+      console.log('📋 Force reseed requested, clearing Redis SFS lists...');
+      await redis.del('sfs_exclude_lists');
+      await redis.del('sfs_exclude_lists_version');
+    }
     const version = await redis.get('sfs_exclude_lists_version');
     const data = version === 'v2' ? await redis.hgetall('sfs_exclude_lists') : null;
     if (data && Object.keys(data).length > 0) {
@@ -3640,6 +3647,12 @@ app.get('/schedule', (req, res) => {
     upcoming: upcoming.slice(0, 50),
     total: upcoming.length,
   });
+});
+
+app.post('/debug/reseed-exclude-lists', async (req, res) => {
+  await redis.set('sfs_exclude_lists_force_reseed', '1');
+  await loadSfsExcludeLists();
+  res.json({ ok: true, sfsExcludeLists });
 });
 
 app.get('/debug/exclude-lists', async (req, res) => {
