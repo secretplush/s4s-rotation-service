@@ -573,7 +573,24 @@ async function processOverdueDeletes() {
     const batch = overdue.slice(i, i + BATCH_SIZE);
     const results = await Promise.allSettled(
       batch.map(async (del) => {
-        const success = await deletePost(del.postId, del.accountId);
+        const promoter = del.promoter || '';
+        let success;
+        if (ARCHIVE_INSTEAD_OF_DELETE.has(promoter)) {
+          try {
+            const archiveRes = await fetch(`${OF_API_BASE}/${del.accountId}/posts/${del.postId}/archive`, {
+              method: 'POST',
+              headers: { 'Authorization': `Bearer ${OF_API_KEY}`, 'Content-Type': 'application/json' },
+              body: JSON.stringify({ private_archive: true })
+            });
+            success = archiveRes.ok || archiveRes.status === 404 || archiveRes.status === 400;
+            console.log(`📦 Archived (paid page batch) post ${del.postId} for ${promoter}: ${archiveRes.status}`);
+          } catch (e) {
+            console.error(`Failed to archive ${del.postId}:`, e.message);
+            success = false;
+          }
+        } else {
+          success = await deletePost(del.postId, del.accountId);
+        }
         return { postId: del.postId, success };
       })
     );
@@ -1321,9 +1338,9 @@ async function runPinnedPostRotation() {
   
   const pinnedState = await getPinnedState();
   
-  // Dynamic: scale featured girls with network size, each featured on 5 pages max
-  const PINNED_FEATURED_PER_DAY = Math.max(1, Math.floor(targetableModels.length / PINNED_ACCOUNTS_PER_GIRL));
-  console.log(`📌 Dynamic scaling: ${PINNED_FEATURED_PER_DAY} featured × ${PINNED_ACCOUNTS_PER_GIRL} promoters = ${PINNED_FEATURED_PER_DAY * PINNED_ACCOUNTS_PER_GIRL} posts (${targetableModels.length} models)`);
+  // Dynamic: scale featured girls with network size — ceil ensures every model gets assigned as a promoter
+  const PINNED_FEATURED_PER_DAY = Math.max(1, Math.ceil(allModels.length / PINNED_ACCOUNTS_PER_GIRL));
+  console.log(`📌 Dynamic scaling: ${PINNED_FEATURED_PER_DAY} featured × up to ${PINNED_ACCOUNTS_PER_GIRL} promoters (${allModels.length} models, all will be assigned)`);
   
   const dayIndex = pinnedState.dayIndex || 0;
   const startIdx = (dayIndex * PINNED_FEATURED_PER_DAY) % allModels.length;
@@ -1338,28 +1355,46 @@ async function runPinnedPostRotation() {
   
   console.log(`📌 Today's featured (day ${dayIndex + 1}): ${PINNED_FEATURED_PER_DAY} girls from ${targetableModels.length} models: ${featuredGirls.join(', ')}`);
   
-  // For each featured girl, pick 5 accounts to pin on (not their own)
-  // Track history so the same girl doesn't get pinned on the same accounts repeatedly
+  // Assign ALL models as promoters — every girl gets exactly 1 pin on her page
+  // Featured girls get 4-5 promoters each (some get fewer when total doesn't divide evenly)
   const activePosts = [];
-  const allOtherModels = [...allModels]; // pool of promoters
+  
+  // Build promoter pool: all models shuffled, excluding featured girls from promoting themselves
+  const featuredSet = new Set(featuredGirls);
+  const promoterPool = allModels.filter(m => true).sort(() => Math.random() - 0.5); // shuffle all
   
   // Load pin history: { featuredUsername: [promoter1, promoter2, ...] } (last used promoters)
   const pinHistory = (await redis.get('s4s:pin-history')) || {};
   
+  // Pre-assign: distribute ALL models across featured girls round-robin
+  const featuredAssignments = Object.fromEntries(featuredGirls.map(f => [f, []]));
+  const unassigned = promoterPool.filter(m => !featuredSet.has(m)); // non-featured first
+  const featuredAsPromoters = promoterPool.filter(m => featuredSet.has(m)); // featured girls promote too
+  const allPromoters = [...unassigned, ...featuredAsPromoters];
+  
+  let featIdx = 0;
+  for (const promoter of allPromoters) {
+    // Find a featured girl this promoter can promote (not themselves)
+    let assigned = false;
+    for (let attempt = 0; attempt < featuredGirls.length; attempt++) {
+      const fi = (featIdx + attempt) % featuredGirls.length;
+      const featured = featuredGirls[fi];
+      if (promoter === featured) continue; // skip self
+      if (EXCLUDE_TARGETS[promoter] && EXCLUDE_TARGETS[promoter].has(featured)) continue;
+      featuredAssignments[featured].push(promoter);
+      featIdx = (fi + 1) % featuredGirls.length;
+      assigned = true;
+      break;
+    }
+    if (!assigned) {
+      console.log(`⚠️ Could not assign promoter ${promoter} to any featured girl`);
+    }
+  }
+  
+  console.log(`📌 Promoter distribution: ${featuredGirls.map(f => `${f}:${featuredAssignments[f].length}`).join(', ')}`);
+  
   for (const featured of featuredGirls) {
-    // Get available promoters (not the featured girl herself, and not already assigned today)
-    const usedPromoters = new Set(activePosts.map(p => p.promoter));
-    const available = allOtherModels.filter(m => m !== featured && !usedPromoters.has(m) && !(EXCLUDE_TARGETS[m] && EXCLUDE_TARGETS[m].has(featured)));
-    
-    // Sort: prioritize accounts that HAVEN'T promoted this girl recently
-    const recentPromoters = new Set(pinHistory[featured] || []);
-    const fresh = available.filter(m => !recentPromoters.has(m));
-    const stale = available.filter(m => recentPromoters.has(m));
-    
-    // Pick from fresh first, then stale if not enough fresh
-    const shuffledFresh = fresh.sort(() => Math.random() - 0.5);
-    const shuffledStale = stale.sort(() => Math.random() - 0.5);
-    const promoters = [...shuffledFresh, ...shuffledStale].slice(0, PINNED_ACCOUNTS_PER_GIRL);
+    const promoters = featuredAssignments[featured];
     
     // Update history: store this round's promoters (keep last 2 rounds = 12 accounts)
     const prevHistory = pinHistory[featured] || [];
@@ -3634,7 +3669,19 @@ app.post('/stop', async (req, res) => {
   const pending = await getPendingDeletes();
   
   for (const del of pending) {
-    await deletePost(del.postId, del.accountId);
+    const promoter = del.promoter || '';
+    if (ARCHIVE_INSTEAD_OF_DELETE.has(promoter)) {
+      try {
+        await fetch(`${OF_API_BASE}/${del.accountId}/posts/${del.postId}/archive`, {
+          method: 'POST',
+          headers: { 'Authorization': `Bearer ${OF_API_KEY}`, 'Content-Type': 'application/json' },
+          body: JSON.stringify({ private_archive: true })
+        });
+        console.log(`📦 Archived (stop cleanup) post ${del.postId} for ${promoter}`);
+      } catch (e) { console.error(`Failed to archive ${del.postId}:`, e.message); }
+    } else {
+      await deletePost(del.postId, del.accountId);
+    }
     await removePendingDelete(del.postId);
     rotationState.stats.totalDeletes++;
   }
@@ -3878,7 +3925,21 @@ app.post('/cleanup', async (req, res) => {
   let cleaned = 0;
   
   for (const del of pending) {
-    const success = await deletePost(del.postId, del.accountId);
+    const promoter = del.promoter || '';
+    let success;
+    if (ARCHIVE_INSTEAD_OF_DELETE.has(promoter)) {
+      try {
+        const archiveRes = await fetch(`${OF_API_BASE}/${del.accountId}/posts/${del.postId}/archive`, {
+          method: 'POST',
+          headers: { 'Authorization': `Bearer ${OF_API_KEY}`, 'Content-Type': 'application/json' },
+          body: JSON.stringify({ private_archive: true })
+        });
+        success = archiveRes.ok || archiveRes.status === 404 || archiveRes.status === 400;
+        console.log(`📦 Archived (cleanup) post ${del.postId} for ${promoter}: ${archiveRes.status}`);
+      } catch (e) { console.error(`Failed to archive ${del.postId}:`, e.message); success = false; }
+    } else {
+      success = await deletePost(del.postId, del.accountId);
+    }
     if (success) {
       await removePendingDelete(del.postId);
       cleaned++;
