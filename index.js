@@ -1759,6 +1759,22 @@ const SFS_EXCLUDE_LISTS_HARDCODED = {
   "sophiamurphy": ["1262696990"],
   "camilaxcruz": ["1262696992"],
   "itsskylarrae": ["1262696995"],
+  "adalyndean": ["1262749870"],
+  "bellaxbrookss": ["1265559670"],
+  "carinawestbrook": ["1264098477"],
+  "islawest": ["1264101958"],
+  "jadexwilde": ["1263394074"],
+  "jennilii": ["1264101639"],
+  "katievancee": ["1265043118"],
+  "kaylareeddd": ["1264818289"],
+  "lexiwilderrr": ["1267457291"],
+  "lindsaycahill": ["1265802709"],
+  "lunalatinaaa": ["1265562140"],
+  "rarilynfaye": ["1266683901"],
+  "siennavane": ["1264560990"],
+  "summerxbrookes": ["1267969606"],
+  "tatumhill": ["1264318890"],
+  "zaramaeee": ["1264817895"],
 };
 
 // Dynamic SFS exclude lists from Redis (loaded on startup, refreshed periodically)
