@@ -723,6 +723,14 @@ async function _refreshAccountsCache() {
     }
   }
   
+  // Filter out skipped models (left agency, etc.)
+  for (const username of SKIP_MODELS) {
+    if (accountMap[username]) {
+      delete accountMap[username];
+      console.log(`🚫 Skipping ${username} (in skip list)`);
+    }
+  }
+
   _modelAccountsCache = accountMap;
   accountIdToUsername = idMap;
   _modelAccountsCacheTs = Date.now();
@@ -811,6 +819,19 @@ async function loadModelAccounts(forceRefresh = false) {
     console.error('Failed to load accounts:', e);
     if (_modelAccountsCache) return _modelAccountsCache;
     return {};
+  }
+}
+
+// Models completely removed from S4S (left agency, etc.) — stored in Redis, loaded on startup
+let SKIP_MODELS = new Set();
+
+async function loadSkipModels() {
+  try {
+    const members = await redis.smembers('s4s:skip_models');
+    SKIP_MODELS = new Set(members || []);
+    if (SKIP_MODELS.size > 0) console.log(`🚫 Skip models: ${[...SKIP_MODELS].join(', ')}`);
+  } catch (e) {
+    console.error('Failed to load skip models:', e.message);
   }
 }
 
@@ -3113,6 +3134,31 @@ app.get('/exclude-lists', async (req, res) => {
   res.json({ accounts: status, totalAccounts: Object.keys(status).length });
 });
 
+// Skip models management (remove from all S4S activity)
+app.post('/skip-model', async (req, res) => {
+  const { username } = req.body || {};
+  if (!username) return res.status(400).json({ error: 'username required' });
+  await redis.sadd('s4s:skip_models', username.toLowerCase());
+  SKIP_MODELS.add(username.toLowerCase());
+  // Force cache refresh so model is immediately excluded
+  _modelAccountsCacheTs = 0;
+  console.log(`🚫 Added ${username} to skip list`);
+  res.json({ ok: true, skipped: [...SKIP_MODELS] });
+});
+
+app.delete('/skip-model/:username', async (req, res) => {
+  const username = req.params.username.toLowerCase();
+  await redis.srem('s4s:skip_models', username);
+  SKIP_MODELS.delete(username);
+  _modelAccountsCacheTs = 0;
+  console.log(`✅ Removed ${username} from skip list`);
+  res.json({ ok: true, skipped: [...SKIP_MODELS] });
+});
+
+app.get('/skip-models', async (req, res) => {
+  res.json({ skipped: [...SKIP_MODELS] });
+});
+
 async function getBiancaActiveChatters() {
   // Fetch active chatter IDs from bianca daemon via tunnel
   try {
@@ -4857,6 +4903,9 @@ app.listen(PORT, async () => {
   console.log(`   GET  /exclude-lists   - View auto-managed exclude list status`);
   console.log(`   POST /webhooks/onlyfans - Webhook endpoint for OF API`);
   
+  // Load skip models (removed from agency)
+  await loadSkipModels();
+
   // Load SFS exclude lists from Redis (seeds if needed)
   await loadSfsExcludeLists();
   
