@@ -3881,108 +3881,112 @@ app.get('/smart-link-roi/:linkId', async (req, res) => {
     // Step 3: Get all accounts
     const accounts = await loadModelAccounts();
 
-    // Step 4: Scan transactions on ALL accounts for these fans
+    // Step 4: Scan transactions on ALL accounts in parallel batches
     const crossModelResults = {};
     const directResults = [];
     let totalCrossGross = 0;
     let totalDirectGross = 0;
 
-    for (const [username, accountId] of Object.entries(accounts)) {
-      let txnOffset = 0;
+    const BATCH_SIZE = 10; // 10 accounts at a time
+    const accountEntries = Object.entries(accounts);
+    
+    async function scanAccount([username, accountId]) {
       const isLinkAccount = accountId === linkAccountId;
-
-      while (txnOffset < 500) {
+      const results = [];
+      let txnOffset = 0;
+      while (txnOffset < 300) { // Limit to 300 txns per account for speed
         try {
+          const controller = new AbortController();
+          const timeout = setTimeout(() => controller.abort(), 15000);
           const tRes = await fetch(`${OF_API_BASE}/${accountId}/transactions?limit=100&offset=${txnOffset}`, {
-            headers: { 'Authorization': `Bearer ${OF_API_KEY}` }
+            headers: { 'Authorization': `Bearer ${OF_API_KEY}` },
+            signal: controller.signal
           });
+          clearTimeout(timeout);
           const tData = await tRes.json();
           const txns = Array.isArray(tData.data) ? tData.data : (tData.data?.list || []);
           if (!txns.length) break;
-
           for (const t of txns) {
             const fanUsername = t.user?.username;
             if (!fanUsername || !fanMap[fanUsername]) continue;
             const amt = parseFloat(t.amount || 0);
             if (amt <= 0) continue;
-
             const txnDate = new Date(t.createdAt || t.created_at);
             const fanSubDate = fanMap[fanUsername].subDate;
-            if (!fanSubDate || txnDate <= fanSubDate) continue; // Only AFTER sub
-
-            const entry = {
-              fan: fanUsername,
-              fanName: t.user?.name || fanMap[fanUsername].name,
-              amount: amt,
-              date: t.createdAt || t.created_at,
-              type: (t.description || t.type || '').replace(/<[^>]*>/g, '').trim(),
-              subDate: fanSubDate.toISOString()
-            };
-
-            if (isLinkAccount) {
-              directResults.push(entry);
-              totalDirectGross += amt;
-            } else {
-              // Verify fan subbed to this model AFTER link sub
-              // We'll do this check for significant amounts only to save API calls
-              if (!crossModelResults[username]) crossModelResults[username] = [];
-              crossModelResults[username].push(entry);
-              totalCrossGross += amt;
-            }
+            if (!fanSubDate || txnDate <= fanSubDate) continue;
+            results.push({ username, isLinkAccount, fan: fanUsername, fanName: t.user?.name || fanMap[fanUsername].name, amount: amt, date: t.createdAt || t.created_at, type: (t.description || t.type || '').replace(/<[^>]*>/g, '').trim(), subDate: fanSubDate.toISOString() });
           }
           txnOffset += 100;
-        } catch (e) {
-          break;
+        } catch (e) { break; }
+      }
+      return results;
+    }
+
+    for (let i = 0; i < accountEntries.length; i += BATCH_SIZE) {
+      const batch = accountEntries.slice(i, i + BATCH_SIZE);
+      const batchResults = await Promise.all(batch.map(scanAccount));
+      for (const results of batchResults) {
+        for (const entry of results) {
+          if (entry.isLinkAccount) {
+            directResults.push(entry);
+            totalDirectGross += entry.amount;
+          } else {
+            if (!crossModelResults[entry.username]) crossModelResults[entry.username] = [];
+            crossModelResults[entry.username].push(entry);
+            totalCrossGross += entry.amount;
+          }
         }
       }
     }
 
-    // Step 5: Verify cross-model sub dates (confirm they subbed AFTER link model)
+    // Step 5: Verify cross-model sub dates in parallel batches
     const verifiedCross = {};
     let verifiedCrossGross = 0;
     const excludedCross = {};
     let excludedCrossGross = 0;
 
+    const verifyJobs = [];
     for (const [model, txns] of Object.entries(crossModelResults)) {
       const accountId = accounts[model];
       if (!accountId) continue;
-
-      // Get unique fans to check
       const uniqueFans = [...new Set(txns.map(t => t.fan))];
-
       for (const fanUsername of uniqueFans) {
+        verifyJobs.push({ model, accountId, fanUsername, txns: txns.filter(t => t.fan === fanUsername) });
+      }
+    }
+
+    for (let i = 0; i < verifyJobs.length; i += BATCH_SIZE) {
+      const batch = verifyJobs.slice(i, i + BATCH_SIZE);
+      await Promise.all(batch.map(async ({ model, accountId, fanUsername, txns }) => {
+        const fanGross = txns.reduce((s, t) => s + t.amount, 0);
         try {
+          const controller = new AbortController();
+          const timeout = setTimeout(() => controller.abort(), 10000);
           const uRes = await fetch(`${OF_API_BASE}/${accountId}/users/${fanUsername}`, {
-            headers: { 'Authorization': `Bearer ${OF_API_KEY}` }
+            headers: { 'Authorization': `Bearer ${OF_API_KEY}` },
+            signal: controller.signal
           });
+          clearTimeout(timeout);
           const uData = await uRes.json();
           const subData = uData.data?.subscribedByData || uData.subscribedByData;
           const modelSubDate = subData?.subscribeAt ? new Date(subData.subscribeAt) : null;
           const linkSubDate = fanMap[fanUsername]?.subDate;
 
-          const fanTxns = txns.filter(t => t.fan === fanUsername);
-          const fanGross = fanTxns.reduce((s, t) => s + t.amount, 0);
-
           if (modelSubDate && linkSubDate && modelSubDate > linkSubDate) {
-            // Confirmed: subbed to this model AFTER link model
             if (!verifiedCross[model]) verifiedCross[model] = { txns: [], subDate: modelSubDate.toISOString() };
-            verifiedCross[model].txns.push(...fanTxns.map(t => ({ ...t, modelSubDate: modelSubDate.toISOString() })));
+            verifiedCross[model].txns.push(...txns.map(t => ({ ...t, modelSubDate: modelSubDate.toISOString() })));
             verifiedCrossGross += fanGross;
           } else {
-            // Subbed before or can't verify
             if (!excludedCross[model]) excludedCross[model] = [];
-            excludedCross[model].push(...fanTxns);
+            excludedCross[model].push(...txns);
             excludedCrossGross += fanGross;
           }
         } catch (e) {
-          // Can't verify, include with caveat
-          const fanTxns = txns.filter(t => t.fan === fanUsername);
-          const fanGross = fanTxns.reduce((s, t) => s + t.amount, 0);
           if (!verifiedCross[model]) verifiedCross[model] = { txns: [], subDate: 'unverified' };
-          verifiedCross[model].txns.push(...fanTxns.map(t => ({ ...t, modelSubDate: 'unverified' })));
+          verifiedCross[model].txns.push(...txns.map(t => ({ ...t, modelSubDate: 'unverified' })));
           verifiedCrossGross += fanGross;
         }
-      }
+      }));
     }
 
     // Step 6: Calculate ROI
