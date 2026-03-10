@@ -836,7 +836,7 @@ async function loadSkipModels() {
 }
 
 // Models that promote others but are NEVER tagged/promoted themselves (no promo image)
-const PROMOTER_ONLY = new Set(['taylorskully']);
+const PROMOTER_ONLY = new Set([]);
 
 // Models that promote others but are never promoted/tagged THEMSELVES (regular schedule, not boosted like PROMOTER_ONLY)
 const NO_PROMOTE = new Set(['jennaamitchell']);
@@ -1766,7 +1766,6 @@ const SFS_EXCLUDE_LISTS_HARDCODED = {
   "nickyecker": ["1262454374", "1262032687"],
   "rachelxbennett": ["1262454380"],
   "saralovexx": ["1262561090", "1262025765"],
-  "taylorskully": ["1262454416"],
   "tessaxsloane": ["1262454430"],
   "winterclaire": ["1262454452", "1207065982"],
   "xoharperr": ["1262458622", "1262020806"],
