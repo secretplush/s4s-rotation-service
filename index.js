@@ -4108,6 +4108,49 @@ app.get('/smart-link-roi', async (req, res) => {
   res.json({ links: Object.entries(index).map(([id, data]) => ({ id, ...data })) });
 });
 
+app.get('/models-status', async (req, res) => {
+  try {
+    const accounts = await loadModelAccounts();
+    const allModels = Object.keys(accounts);
+    const totalConnected = allModels.length;
+    const models = {};
+
+    for (const model of allModels) {
+      const flags = [];
+      const exclusions = [];
+
+      if (SKIP_MODELS.has(model)) flags.push('skipped');
+      if (PROMOTER_ONLY.has(model)) flags.push('promoter_only');
+      if (NO_PROMOTE.has(model)) flags.push('no_promote');
+      if (ARCHIVE_INSTEAD_OF_DELETE.has(model)) flags.push('archive_delete');
+
+      if (EXCLUDE_TARGETS[model]) {
+        exclusions.push(...EXCLUDE_TARGETS[model]);
+      }
+
+      if (flags.length > 0 || exclusions.length > 0) {
+        models[model] = { flags };
+        if (exclusions.length > 0) models[model].exclusions = exclusions;
+      }
+    }
+
+    // Also include skipped models not in accounts (they won't appear in allModels)
+    for (const model of SKIP_MODELS) {
+      if (!models[model]) {
+        models[model] = { flags: ['skipped'] };
+      }
+    }
+
+    const totalSkipped = Object.values(models).filter(m => m.flags.includes('skipped')).length;
+    const totalActive = totalConnected - Object.keys(models).filter(m => models[m].flags.includes('skipped') && allModels.includes(m)).length;
+
+    res.json({ models, totalActive, totalSkipped });
+  } catch (e) {
+    console.error('Error in /models-status:', e);
+    res.status(500).json({ error: e.message });
+  }
+});
+
 app.get('/stats', async (req, res) => {
   const pending = await getPendingDeletes();
   const pinnedState = await getPinnedState();
