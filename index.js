@@ -3992,7 +3992,9 @@ app.get('/smart-link-roi/:linkId', async (req, res) => {
     const roi = actualAdSpend > 0 ? ((kieferCut - actualAdSpend) / actualAdSpend * 100) : 0;
     const grossToBreakEven = actualAdSpend > 0 ? (actualAdSpend / cut / (1 - OF_CUT)) - totalGross : 0;
 
-    res.json({
+    // Cache results to Redis (persists even if models disconnect)
+    const roiResult = {
+      timestamp: new Date().toISOString(),
       smartLink: {
         id: linkId,
         name: link.name,
@@ -4043,11 +4045,64 @@ app.get('/smart-link-roi/:linkId', async (req, res) => {
         roi: +roi.toFixed(1),
         grossToBreakEven: +Math.max(0, grossToBreakEven).toFixed(2),
       }
-    });
+    };
+
+    // Cache to Redis — persists even if models disconnect later
+    // Store the full result + a per-fan ledger for incremental updates
+    await redis.set(`roi:${linkId}:latest`, JSON.stringify(roiResult));
+    
+    // Store per-fan transaction ledger (merge with existing)
+    const ledgerKey = `roi:${linkId}:ledger`;
+    const existingLedger = JSON.parse(await redis.get(ledgerKey) || '{}');
+    
+    // Merge direct transactions
+    for (const t of directResults) {
+      const key = `${linkAccountUsername}:${t.fan}:${t.date}`;
+      existingLedger[key] = { model: linkAccountUsername, ...t };
+    }
+    // Merge verified cross transactions
+    for (const [model, data] of Object.entries(verifiedCross)) {
+      for (const t of data.txns) {
+        const key = `${model}:${t.fan}:${t.date}`;
+        existingLedger[key] = { model, ...t };
+      }
+    }
+    await redis.set(ledgerKey, JSON.stringify(existingLedger));
+    
+    // Track link in the index
+    const indexKey = 'roi:links';
+    const index = JSON.parse(await redis.get(indexKey) || '{}');
+    index[linkId] = {
+      name: link.name,
+      account: linkAccountUsername,
+      adSpend: actualAdSpend,
+      fans: totalFans,
+      lastScanned: roiResult.timestamp,
+      roi: roiResult.totals.roi,
+      networkGross: roiResult.totals.networkGross,
+    };
+    await redis.set(indexKey, JSON.stringify(index));
+    
+    console.log(`📊 ROI scan cached for ${link.name}: $${totalGross.toFixed(2)} gross, ${roi.toFixed(1)}% ROI, ledger has ${Object.keys(existingLedger).length} entries`);
+
+    res.json(roiResult);
   } catch (e) {
     console.error('Smart link ROI error:', e);
     res.status(500).json({ error: e.message });
   }
+});
+
+// Get cached ROI result (instant, no API calls)
+app.get('/smart-link-roi/:linkId/cached', async (req, res) => {
+  const cached = await redis.get(`roi:${req.params.linkId}:latest`);
+  if (!cached) return res.status(404).json({ error: 'No cached data. Run a live scan first: GET /smart-link-roi/:linkId?adSpend=X' });
+  res.json(JSON.parse(cached));
+});
+
+// List all tracked smart links
+app.get('/smart-link-roi', async (req, res) => {
+  const index = JSON.parse(await redis.get('roi:links') || '{}');
+  res.json({ links: Object.entries(index).map(([id, data]) => ({ id, ...data })) });
 });
 
 app.get('/stats', async (req, res) => {
