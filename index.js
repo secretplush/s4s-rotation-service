@@ -5216,6 +5216,48 @@ app.get('/openclaw/tunnel', async (req, res) => {
 
 // === START SERVER ===
 
+// ── Graceful Shutdown: drain all pending deletes before exit ──
+async function gracefulShutdown(signal) {
+  console.log(`\n⚠️ ${signal} received — draining pending deletes before exit...`);
+  isRunning = false;
+  
+  try {
+    const pending = await getPendingDeletes();
+    if (pending.length > 0) {
+      console.log(`🗑️ ${pending.length} pending deletes to process...`);
+      for (const del of pending) {
+        const promoter = del.promoter || '';
+        try {
+          if (ARCHIVE_INSTEAD_OF_DELETE.has(promoter)) {
+            await fetch(`${OF_API_BASE}/${del.accountId}/posts/${del.postId}/archive`, {
+              method: 'POST',
+              headers: { 'Authorization': `Bearer ${OF_API_KEY}`, 'Content-Type': 'application/json' },
+              body: JSON.stringify({ private_archive: true })
+            });
+            console.log(`📦 Archived ${del.postId} for ${promoter}`);
+          } else {
+            await deletePost(del.postId, del.accountId);
+            console.log(`🗑️ Deleted ${del.postId} for ${promoter}`);
+          }
+          await removePendingDelete(del.postId);
+        } catch (e) {
+          console.error(`❌ Failed to delete ${del.postId}: ${e.message}`);
+        }
+      }
+      console.log(`✅ Shutdown cleanup complete — processed ${pending.length} deletes`);
+    } else {
+      console.log('✅ No pending deletes — clean shutdown');
+    }
+  } catch (e) {
+    console.error('❌ Shutdown cleanup error:', e.message);
+  }
+  
+  process.exit(0);
+}
+
+process.on('SIGTERM', () => gracefulShutdown('SIGTERM'));
+process.on('SIGINT', () => gracefulShutdown('SIGINT'));
+
 app.listen(PORT, async () => {
   console.log(`🚀 S4S Rotation Service running on port ${PORT}`);
   console.log(`   POST /start         - Start rotation`);
