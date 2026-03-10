@@ -3816,6 +3816,240 @@ app.get('/debug/exclude-lists', async (req, res) => {
   }
 });
 
+// ============================================================
+// SMART LINK ROI CALCULATOR
+// GET /smart-link-roi/:linkId?adSpend=474.45&cut=0.75
+// Pulls smart link conversions, cross-refs transactions + sub dates
+// ============================================================
+app.get('/smart-link-roi/:linkId', async (req, res) => {
+  const { linkId } = req.params;
+  const adSpend = parseFloat(req.query.adSpend || '0');
+  const cut = parseFloat(req.query.cut || '0.75'); // Kiefer's cut of net
+  const OF_CUT = 0.20;
+
+  try {
+    // Step 1: Get smart link info
+    const slRes = await fetch(`${OF_API_BASE}/smart-links`, {
+      headers: { 'Authorization': `Bearer ${OF_API_KEY}` }
+    });
+    const allLinks = await slRes.json();
+    const links = Array.isArray(allLinks) ? allLinks : (allLinks.data || []);
+    const link = links.find(l => l.id === linkId);
+    if (!link) return res.status(404).json({ error: 'Smart link not found' });
+
+    const linkAccountId = link.account?.id;
+    const linkAccountUsername = link.account?.display_name || link.account?.username || '';
+    const linkRevenue = parseFloat(link.revenue || '0');
+    const actualAdSpend = adSpend || parseFloat(link.cost?.perPromo || '0') || 0;
+
+    // Step 2: Get all conversions from smart link (paginate)
+    let allConversions = [];
+    let offset = 0;
+    while (true) {
+      const cRes = await fetch(`${OF_API_BASE}/${linkAccountId}/smart-links/${linkId}/conversions?limit=100&offset=${offset}`, {
+        headers: { 'Authorization': `Bearer ${OF_API_KEY}` }
+      });
+      const cData = await cRes.json();
+      const rows = cData?.data?.rows || [];
+      if (!rows.length) break;
+      allConversions.push(...rows);
+      offset += 100;
+      if (rows.length < 100) break;
+    }
+
+    // Build fan map: username -> { subDate, grossOnLink }
+    const fanMap = {};
+    for (const c of allConversions) {
+      const username = c.fan?.username;
+      if (!username) continue;
+      if (c.conversion_type === 'new_subscriber') {
+        if (!fanMap[username]) fanMap[username] = { subDate: null, grossOnLink: 0, name: c.fan?.name || '' };
+        const dt = new Date(c.conversion_at);
+        if (!fanMap[username].subDate || dt < fanMap[username].subDate) {
+          fanMap[username].subDate = dt;
+        }
+      }
+      if (c.conversion_type === 'new_transaction') {
+        if (!fanMap[username]) fanMap[username] = { subDate: null, grossOnLink: 0, name: c.fan?.name || '' };
+        fanMap[username].grossOnLink += parseFloat(c.amount_gross || 0);
+      }
+    }
+
+    const fanUsernames = new Set(Object.keys(fanMap));
+    const totalFans = fanUsernames.size;
+
+    // Step 3: Get all accounts
+    const accounts = await loadModelAccounts();
+
+    // Step 4: Scan transactions on ALL accounts for these fans
+    const crossModelResults = {};
+    const directResults = [];
+    let totalCrossGross = 0;
+    let totalDirectGross = 0;
+
+    for (const [username, accountId] of Object.entries(accounts)) {
+      let txnOffset = 0;
+      const isLinkAccount = accountId === linkAccountId;
+
+      while (txnOffset < 500) {
+        try {
+          const tRes = await fetch(`${OF_API_BASE}/${accountId}/transactions?limit=100&offset=${txnOffset}`, {
+            headers: { 'Authorization': `Bearer ${OF_API_KEY}` }
+          });
+          const tData = await tRes.json();
+          const txns = Array.isArray(tData.data) ? tData.data : (tData.data?.list || []);
+          if (!txns.length) break;
+
+          for (const t of txns) {
+            const fanUsername = t.user?.username;
+            if (!fanUsername || !fanMap[fanUsername]) continue;
+            const amt = parseFloat(t.amount || 0);
+            if (amt <= 0) continue;
+
+            const txnDate = new Date(t.createdAt || t.created_at);
+            const fanSubDate = fanMap[fanUsername].subDate;
+            if (!fanSubDate || txnDate <= fanSubDate) continue; // Only AFTER sub
+
+            const entry = {
+              fan: fanUsername,
+              fanName: t.user?.name || fanMap[fanUsername].name,
+              amount: amt,
+              date: t.createdAt || t.created_at,
+              type: (t.description || t.type || '').replace(/<[^>]*>/g, '').trim(),
+              subDate: fanSubDate.toISOString()
+            };
+
+            if (isLinkAccount) {
+              directResults.push(entry);
+              totalDirectGross += amt;
+            } else {
+              // Verify fan subbed to this model AFTER link sub
+              // We'll do this check for significant amounts only to save API calls
+              if (!crossModelResults[username]) crossModelResults[username] = [];
+              crossModelResults[username].push(entry);
+              totalCrossGross += amt;
+            }
+          }
+          txnOffset += 100;
+        } catch (e) {
+          break;
+        }
+      }
+    }
+
+    // Step 5: Verify cross-model sub dates (confirm they subbed AFTER link model)
+    const verifiedCross = {};
+    let verifiedCrossGross = 0;
+    const excludedCross = {};
+    let excludedCrossGross = 0;
+
+    for (const [model, txns] of Object.entries(crossModelResults)) {
+      const accountId = accounts[model];
+      if (!accountId) continue;
+
+      // Get unique fans to check
+      const uniqueFans = [...new Set(txns.map(t => t.fan))];
+
+      for (const fanUsername of uniqueFans) {
+        try {
+          const uRes = await fetch(`${OF_API_BASE}/${accountId}/users/${fanUsername}`, {
+            headers: { 'Authorization': `Bearer ${OF_API_KEY}` }
+          });
+          const uData = await uRes.json();
+          const subData = uData.data?.subscribedByData || uData.subscribedByData;
+          const modelSubDate = subData?.subscribeAt ? new Date(subData.subscribeAt) : null;
+          const linkSubDate = fanMap[fanUsername]?.subDate;
+
+          const fanTxns = txns.filter(t => t.fan === fanUsername);
+          const fanGross = fanTxns.reduce((s, t) => s + t.amount, 0);
+
+          if (modelSubDate && linkSubDate && modelSubDate > linkSubDate) {
+            // Confirmed: subbed to this model AFTER link model
+            if (!verifiedCross[model]) verifiedCross[model] = { txns: [], subDate: modelSubDate.toISOString() };
+            verifiedCross[model].txns.push(...fanTxns.map(t => ({ ...t, modelSubDate: modelSubDate.toISOString() })));
+            verifiedCrossGross += fanGross;
+          } else {
+            // Subbed before or can't verify
+            if (!excludedCross[model]) excludedCross[model] = [];
+            excludedCross[model].push(...fanTxns);
+            excludedCrossGross += fanGross;
+          }
+        } catch (e) {
+          // Can't verify, include with caveat
+          const fanTxns = txns.filter(t => t.fan === fanUsername);
+          const fanGross = fanTxns.reduce((s, t) => s + t.amount, 0);
+          if (!verifiedCross[model]) verifiedCross[model] = { txns: [], subDate: 'unverified' };
+          verifiedCross[model].txns.push(...fanTxns.map(t => ({ ...t, modelSubDate: 'unverified' })));
+          verifiedCrossGross += fanGross;
+        }
+      }
+    }
+
+    // Step 6: Calculate ROI
+    const totalGross = totalDirectGross + verifiedCrossGross;
+    const totalNet = totalGross * (1 - OF_CUT);
+    const kieferCut = totalNet * cut;
+    const roi = actualAdSpend > 0 ? ((kieferCut - actualAdSpend) / actualAdSpend * 100) : 0;
+    const grossToBreakEven = actualAdSpend > 0 ? (actualAdSpend / cut / (1 - OF_CUT)) - totalGross : 0;
+
+    res.json({
+      smartLink: {
+        id: linkId,
+        name: link.name,
+        account: linkAccountUsername,
+        clicks: link.clicks_count,
+        subscribers: link.subscribers_count,
+        smartLinkRevenue: linkRevenue,
+      },
+      adSpend: actualAdSpend,
+      fans: totalFans,
+      costPerFan: totalFans > 0 ? +(actualAdSpend / totalFans).toFixed(2) : 0,
+      direct: {
+        gross: +totalDirectGross.toFixed(2),
+        net: +(totalDirectGross * (1 - OF_CUT)).toFixed(2),
+        transactions: directResults.length,
+      },
+      crossModel: {
+        verified: {
+          gross: +verifiedCrossGross.toFixed(2),
+          net: +(verifiedCrossGross * (1 - OF_CUT)).toFixed(2),
+          models: Object.keys(verifiedCross).length,
+          breakdown: Object.fromEntries(
+            Object.entries(verifiedCross)
+              .sort((a, b) => b[1].txns.reduce((s, t) => s + t.amount, 0) - a[1].txns.reduce((s, t) => s + t.amount, 0))
+              .map(([model, data]) => [model, {
+                gross: +data.txns.reduce((s, t) => s + t.amount, 0).toFixed(2),
+                transactions: data.txns.length,
+                fans: [...new Set(data.txns.map(t => t.fan))].map(f => ({
+                  username: f,
+                  name: data.txns.find(t => t.fan === f)?.fanName || '',
+                  spent: +data.txns.filter(t => t.fan === f).reduce((s, t) => s + t.amount, 0).toFixed(2),
+                  modelSubDate: data.txns.find(t => t.fan === f)?.modelSubDate,
+                  linkSubDate: fanMap[f]?.subDate?.toISOString(),
+                }))
+              }])
+          ),
+        },
+        excluded: {
+          gross: +excludedCrossGross.toFixed(2),
+          reason: 'Fan subbed to model BEFORE link model — not attributable',
+          models: Object.keys(excludedCross).length,
+        }
+      },
+      totals: {
+        networkGross: +totalGross.toFixed(2),
+        networkNet: +totalNet.toFixed(2),
+        kieferCut: +kieferCut.toFixed(2),
+        roi: +roi.toFixed(1),
+        grossToBreakEven: +Math.max(0, grossToBreakEven).toFixed(2),
+      }
+    });
+  } catch (e) {
+    console.error('Smart link ROI error:', e);
+    res.status(500).json({ error: e.message });
+  }
+});
+
 app.get('/stats', async (req, res) => {
   const pending = await getPendingDeletes();
   const pinnedState = await getPinnedState();
