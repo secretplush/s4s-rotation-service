@@ -3677,6 +3677,27 @@ async function startupRecovery() {
     rotationState.dailySchedule = generateDailySchedule(models, vaultMappings);
     
     console.log(`📅 Auto-resumed: ${models.length} models, rotation running`);
+    
+    // Self-heal: if schedule looks thin, retry after API cache warms up
+    if (models.length < 20) {
+      console.warn(`⚠️ Only ${models.length} models in schedule — retrying in 30s after cache warms...`);
+      setTimeout(async () => {
+        try {
+          _modelAccountsCacheTs = 0; // Force fresh API fetch
+          const freshRaw = await loadVaultMappings();
+          const freshVault = await filterToConnectedModels(freshRaw);
+          const freshModels = Object.keys(freshVault);
+          if (freshModels.length > models.length) {
+            rotationState.dailySchedule = generateDailySchedule(freshModels, freshVault);
+            console.log(`✅ Schedule self-healed: ${models.length} → ${freshModels.length} models`);
+          } else {
+            console.log(`ℹ️ Schedule retry got ${freshModels.length} models (no improvement)`);
+          }
+        } catch (e) {
+          console.error('❌ Schedule self-heal failed:', e.message);
+        }
+      }, 30000);
+    }
   }
   
   console.log('✅ Startup recovery complete');
