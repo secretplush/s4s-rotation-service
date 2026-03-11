@@ -847,6 +847,7 @@ const ARCHIVE_INSTEAD_OF_DELETE = new Set(['jennaamitchell']);
 // Per-promoter exclusions: key = promoter, value = Set of models that should NEVER be promoted on their page
 const EXCLUDE_TARGETS = {
   'jennaamitchell': new Set(['brookeewest']),
+  'brookeewest': new Set(['jennaamitchell']),
 };
 
 /**
