@@ -939,29 +939,40 @@ function generateDailySchedule(models, vaultMappings) {
     
     // Build target list using LEAST-PROMOTED-FIRST strategy
     // Each tag slot picks the target with the lowest global count (among this model's available targets)
+    // DEDUP: enforce minimum 4hr gap between same promoter→target
+    const MIN_TARGET_GAP_MS = 4 * 60 * 60 * 1000; // 4 hours
     const orderedTargets = [];
-    for (let i = 0; i < tagsPerDay; i++) {
-      // Sort available targets by global count (ascending), break ties randomly
-      const sorted = [...targets].sort((a, b) => {
-        const diff = (globalTargetCount[a] || 0) - (globalTargetCount[b] || 0);
-        return diff !== 0 ? diff : Math.random() - 0.5;
-      });
-      const picked = sorted[0];
-      orderedTargets.push(picked);
-      globalTargetCount[picked] = (globalTargetCount[picked] || 0) + 1;
-    }
+    const lastScheduledTime = {}; // target → last scheduled timestamp for this model
     
     schedule[model] = [];
     let currentTime = now + (1 + Math.random() * 4) * 60 * 1000;
     
     for (let i = 0; i < tagsPerDay; i++) {
-      const target = orderedTargets[i];
-      const jitter = (Math.random() - 0.5) * 6 * 60 * 1000;
-      const scheduledTime = currentTime + jitter;
+      const slotTime = currentTime + (Math.random() - 0.5) * 6 * 60 * 1000;
+      
+      // Sort available targets by global count (ascending), break ties randomly
+      // Filter out targets that were scheduled too recently for this model
+      const eligible = [...targets].filter(t => {
+        const last = lastScheduledTime[t];
+        return !last || (slotTime - last) >= MIN_TARGET_GAP_MS;
+      });
+      
+      // If all targets are on cooldown, pick the one with the oldest schedule
+      const pool = eligible.length > 0 ? eligible : [...targets];
+      const sorted = pool.sort((a, b) => {
+        const diff = (globalTargetCount[a] || 0) - (globalTargetCount[b] || 0);
+        if (diff !== 0) return diff;
+        // Tie-break: prefer target not recently used
+        return (lastScheduledTime[a] || 0) - (lastScheduledTime[b] || 0);
+      });
+      const picked = sorted[0];
+      orderedTargets.push(picked);
+      globalTargetCount[picked] = (globalTargetCount[picked] || 0) + 1;
+      lastScheduledTime[picked] = slotTime;
       
       schedule[model].push({
-        target,
-        scheduledTime,
+        target: picked,
+        scheduledTime: slotTime,
         executed: false,
       });
       
@@ -992,6 +1003,12 @@ async function executeTag(promoter, target, vaultId, accountId) {
   
   const caption = getRandomCaption(target);
   
+  // Safety: never post without a real caption
+  if (!caption || caption.trim().length < 5) {
+    console.error(`🚫 BLOCKED tag ${promoter} → ${target}: empty or too-short caption "${caption}"`);
+    return null;
+  }
+  
   try {
     const res = await fetch(`${OF_API_BASE}/${accountId}/posts`, {
       method: 'POST',
@@ -1014,7 +1031,13 @@ async function executeTag(promoter, target, vaultId, accountId) {
     const data = await res.json();
     const postId = data.id || data.post_id || data.postId || data.data?.id;
     
-    console.log(`✅ Posted: ${promoter} → @${target} (post ${postId})`);
+    // Verify post has caption — OF API sometimes drops text silently
+    const postText = data.text || data.data?.text || '';
+    if (postText.length === 0 || !postText.includes('@')) {
+      console.warn(`⚠️ Post ${postId} for ${promoter} → ${target} may have missing caption (got: "${postText}"). Sent: "${caption}"`);
+    }
+    
+    console.log(`✅ Posted: ${promoter} → @${target} (post ${postId}, caption: "${caption.substring(0, 40)}...")`);
     return postId;
   } catch (e) {
     console.error(`Error posting ${promoter} → ${target}:`, e);
@@ -1022,7 +1045,10 @@ async function executeTag(promoter, target, vaultId, accountId) {
   }
 }
 
-async function deletePost(postId, accountId) {
+async function deletePost(postId, accountId, _retryCount = 0) {
+  const MAX_RETRIES = 3;
+  const RETRY_DELAYS = [10000, 20000, 30000]; // 10s, 20s, 30s
+  
   try {
     const res = await fetch(`${OF_API_BASE}/${accountId}/posts/${postId}`, {
       method: 'DELETE',
@@ -1030,8 +1056,8 @@ async function deletePost(postId, accountId) {
     });
     
     if (res.ok) {
-      console.log(`🗑️ Deleted post ${postId}`);
-      DELETE_CIRCUIT_BREAKER.consecutiveFailures = 0; // reset on success
+      console.log(`🗑️ Deleted post ${postId}${_retryCount > 0 ? ` (retry #${_retryCount})` : ''}`);
+      DELETE_CIRCUIT_BREAKER.consecutiveFailures = 0;
       return true;
     } else {
       const err = await res.text();
@@ -1042,6 +1068,15 @@ async function deletePost(postId, accountId) {
         DELETE_CIRCUIT_BREAKER.consecutiveFailures = 0;
         return true;
       }
+      
+      // 502/503 Proxy errors — immediate retry with backoff
+      if ((res.status === 502 || res.status === 503) && _retryCount < MAX_RETRIES) {
+        const delay = RETRY_DELAYS[_retryCount] || 30000;
+        console.warn(`⚠️ Delete ${postId} got ${res.status}, retrying in ${delay/1000}s (attempt ${_retryCount + 1}/${MAX_RETRIES})`);
+        await new Promise(r => setTimeout(r, delay));
+        return deletePost(postId, accountId, _retryCount + 1);
+      }
+      
       // 500 Server Error — verify if post actually still exists before treating as failure
       if (res.status === 500) {
         try {
@@ -1068,7 +1103,14 @@ async function deletePost(postId, accountId) {
       return false;
     }
   } catch (e) {
-    console.error(`Error deleting post ${postId}:`, e);
+    // Network errors — also retry
+    if (_retryCount < MAX_RETRIES) {
+      const delay = RETRY_DELAYS[_retryCount] || 30000;
+      console.warn(`⚠️ Delete ${postId} network error, retrying in ${delay/1000}s (attempt ${_retryCount + 1}/${MAX_RETRIES}): ${e.message}`);
+      await new Promise(r => setTimeout(r, delay));
+      return deletePost(postId, accountId, _retryCount + 1);
+    }
+    console.error(`Error deleting post ${postId} (after ${_retryCount} retries):`, e);
     onDeleteFailure(postId, accountId, `Exception: ${e}`);
     return false;
   }
