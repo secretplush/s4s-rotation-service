@@ -835,6 +835,26 @@ async function loadSkipModels() {
   }
 }
 
+// APPROVED MODELS — only models explicitly onboarded through the S4S dashboard
+// Models MUST be in this set to participate in rotation (ghost tags, pinned posts, mass DMs)
+let APPROVED_MODELS = new Set();
+
+async function loadApprovedModels() {
+  try {
+    const members = await redis.smembers('s4s:approved_models');
+    APPROVED_MODELS = new Set(members || []);
+    console.log(`✅ Approved S4S models: ${APPROVED_MODELS.size}`);
+  } catch (e) {
+    console.error('Failed to load approved models:', e.message);
+  }
+}
+
+function isApprovedModel(username) {
+  // If no approved list exists yet (migration), allow all (backwards compat)
+  if (APPROVED_MODELS.size === 0) return true;
+  return APPROVED_MODELS.has(username);
+}
+
 // Models that promote others but are NEVER tagged/promoted themselves (no promo image)
 const PROMOTER_ONLY = new Set([]);
 
@@ -865,13 +885,13 @@ async function filterToConnectedModels(vaultMappings) {
     const filtered = {};
     let dropped = [];
     for (const model of Object.keys(vaultMappings)) {
-      if (connectedUsernames.has(model)) {
-        // Also filter targets to only connected models
+      if (connectedUsernames.has(model) && isApprovedModel(model)) {
+        // Also filter targets to only connected AND approved models
         const targets = vaultMappings[model];
         if (typeof targets === 'object' && !Array.isArray(targets)) {
           const filteredTargets = {};
           for (const [target, vaultId] of Object.entries(targets)) {
-            if (connectedUsernames.has(target) || PROMOTER_ONLY.has(model)) {
+            if ((connectedUsernames.has(target) && isApprovedModel(target)) || PROMOTER_ONLY.has(model)) {
               filteredTargets[target] = vaultId;
             }
           }
@@ -3184,6 +3204,40 @@ app.get('/skip-models', async (req, res) => {
   res.json({ skipped: [...SKIP_MODELS] });
 });
 
+// Approved models management — only approved models participate in S4S
+app.post('/approve-model', async (req, res) => {
+  const { username } = req.body;
+  if (!username) return res.status(400).json({ error: 'username required' });
+  await redis.sadd('s4s:approved_models', username.toLowerCase());
+  APPROVED_MODELS.add(username.toLowerCase());
+  console.log(`✅ Approved model for S4S: ${username}`);
+  res.json({ ok: true, approved: [...APPROVED_MODELS].sort() });
+});
+
+app.post('/approve-models-bulk', async (req, res) => {
+  const { usernames } = req.body;
+  if (!usernames || !Array.isArray(usernames)) return res.status(400).json({ error: 'usernames array required' });
+  const lower = usernames.map(u => u.toLowerCase());
+  for (const u of lower) {
+    await redis.sadd('s4s:approved_models', u);
+    APPROVED_MODELS.add(u);
+  }
+  console.log(`✅ Bulk approved ${lower.length} models for S4S`);
+  res.json({ ok: true, added: lower.length, total: APPROVED_MODELS.size });
+});
+
+app.delete('/approve-model/:username', async (req, res) => {
+  const username = req.params.username.toLowerCase();
+  await redis.srem('s4s:approved_models', username);
+  APPROVED_MODELS.delete(username);
+  console.log(`🚫 Removed ${username} from S4S approved list`);
+  res.json({ ok: true, approved: [...APPROVED_MODELS].sort() });
+});
+
+app.get('/approved-models', async (req, res) => {
+  res.json({ approved: [...APPROVED_MODELS].sort(), count: APPROVED_MODELS.size });
+});
+
 async function getBiancaActiveChatters() {
   // Fetch active chatter IDs from bianca daemon via tunnel
   try {
@@ -5329,6 +5383,7 @@ app.listen(PORT, async () => {
   
   // Load skip models (removed from agency)
   await loadSkipModels();
+  await loadApprovedModels();
 
   // Load SFS exclude lists from Redis (seeds if needed)
   await loadSfsExcludeLists();
