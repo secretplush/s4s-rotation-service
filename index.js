@@ -905,7 +905,11 @@ function generateDailySchedule(models, vaultMappings) {
   for (const model of models) {
     // Skip models that can't do ghost tags (paid pages have OF delete limits)
     // Filter targets: exclude promoter-only models (they have no image to tag with)
-    const allTargets = Object.keys(vaultMappings[model] || {});
+    const allTargets = Object.keys(vaultMappings[model] || {}).filter(t => {
+      // Only include targets with valid vault IDs (not null/undefined/empty)
+      const vid = vaultMappings[model]?.[t];
+      return vid && vid !== 'null' && vid !== 'undefined';
+    });
     const excludeSet = EXCLUDE_TARGETS[model] || new Set();
     const targets = allTargets.filter(t => !PROMOTER_ONLY.has(t) && !NO_PROMOTE.has(t) && t !== model && !excludeSet.has(t));
     if (targets.length === 0) continue;
@@ -960,6 +964,12 @@ function getRandomCaption(targetUsername) {
 }
 
 async function executeTag(promoter, target, vaultId, accountId) {
+  // Safety: never post without a valid vault ID (prevents text-only promo posts)
+  if (!vaultId || vaultId === 'null' || vaultId === 'undefined') {
+    console.log(`🚫 BLOCKED tag ${promoter} → ${target}: no valid vault ID`);
+    return null;
+  }
+  
   const caption = getRandomCaption(target);
   
   try {
