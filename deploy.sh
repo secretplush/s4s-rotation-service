@@ -20,16 +20,13 @@ git commit -m "$MSG" || echo "Nothing to commit"
 echo "⬆️  Pushing to GitHub..."
 git push origin main
 
-echo "🚀 Triggering Railway redeploy..."
-DEPLOY_RESP=$(curl -s -X POST "$RAILWAY_API" \
-  -H "Authorization: Bearer $TOKEN" \
-  -H "Content-Type: application/json" \
-  -d "{\"query\":\"mutation { serviceInstanceRedeploy(serviceId: \\\"$SERVICE_ID\\\", environmentId: \\\"$ENV_ID\\\") }\"}")
+echo "🚀 Deploying to Railway (railway up)..."
+railway up --detach
+# railway up uploads local code and triggers a new build
+# serviceInstanceRedeploy only RESTARTS the old build — DO NOT USE
 
-echo "$DEPLOY_RESP" | grep -q "true" && echo "✅ Redeploy triggered" || { echo "❌ Redeploy failed: $DEPLOY_RESP"; exit 1; }
-
-echo "⏳ Waiting for new instance (45s)..."
-sleep 45
+echo "⏳ Waiting for build + deploy (90s)..."
+sleep 90
 
 echo "🔍 Verifying deployment..."
 for i in 1 2 3 4 5; do

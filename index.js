@@ -850,7 +850,7 @@ async function loadApprovedModels() {
 }
 
 function isApprovedModel(username) {
-  // If no approved list exists yet (migration), allow all (backwards compat)
+  // If no approved list exists, allow all (backwards compat during initial seed)
   if (APPROVED_MODELS.size === 0) return true;
   return APPROVED_MODELS.has(username);
 }
@@ -3236,6 +3236,45 @@ app.delete('/approve-model/:username', async (req, res) => {
 
 app.get('/approved-models', async (req, res) => {
   res.json({ approved: [...APPROVED_MODELS].sort(), count: APPROVED_MODELS.size });
+});
+
+// Debug: dump vault mapping model names (who has valid vaults)
+app.get('/vault-models', async (req, res) => {
+  try {
+    const vm = await loadVaultMappings();
+    const models = new Set();
+    for (const [promoter, targets] of Object.entries(vm)) {
+      models.add(promoter);
+      if (typeof targets === 'object') {
+        for (const t of Object.keys(targets)) models.add(t);
+      }
+    }
+    res.json({ models: [...models].sort(), count: models.size });
+  } catch (e) {
+    res.status(500).json({ error: e.message });
+  }
+});
+
+// Auto-seed approved models from vault mappings
+app.post('/seed-approved-from-vaults', async (req, res) => {
+  try {
+    const vm = await loadVaultMappings();
+    const models = new Set();
+    for (const [promoter, targets] of Object.entries(vm)) {
+      models.add(promoter);
+      if (typeof targets === 'object') {
+        for (const t of Object.keys(targets)) models.add(t);
+      }
+    }
+    for (const m of models) {
+      await redis.sadd('s4s:approved_models', m);
+      APPROVED_MODELS.add(m);
+    }
+    console.log(`✅ Seeded ${models.size} approved models from vault mappings`);
+    res.json({ ok: true, seeded: models.size, approved: [...APPROVED_MODELS].sort() });
+  } catch (e) {
+    res.status(500).json({ error: e.message });
+  }
 });
 
 async function getBiancaActiveChatters() {
