@@ -101,38 +101,26 @@ let CONTENT_MAP = null;
 
 function loadContentMap() {
   try {
-    const raw = fs.readFileSync(path.join(__dirname, '..', 'research', 'biancawoods-content-map.json'), 'utf8');
+    const raw = fs.readFileSync(path.join(__dirname, 'biancawoods-content-map.json'), 'utf8');
     CONTENT_MAP = JSON.parse(raw);
     console.log('🗺️ [bianca] Content map loaded');
   } catch (e) {
-    // Fallback: try same directory
-    try {
-      const raw = fs.readFileSync(path.join(__dirname, 'biancawoods-content-map.json'), 'utf8');
-      CONTENT_MAP = JSON.parse(raw);
-      console.log('🗺️ [bianca] Content map loaded (local)');
-    } catch (e2) {
-      console.error('❌ [bianca] Failed to load content map:', e2.message);
-      CONTENT_MAP = null;
-    }
+    console.error('❌ [bianca] Failed to load content map:', e.message);
+    CONTENT_MAP = null;
   }
 }
 
-// ── Brain v3 Playbook (embedded as system prompt) ───────────────────────────
+// ── Bianca Prompt (slim decision-only version) ──────────────────────────────
 
-let BRAIN_V3_TEXT = '';
+let BIANCA_PROMPT_TEXT = '';
 
-function loadBrainV3() {
+function loadBiancaPrompt() {
   try {
-    BRAIN_V3_TEXT = fs.readFileSync(path.join(__dirname, '..', 'research', 'chatbot-brain-v3.md'), 'utf8');
-    console.log('🧠 [bianca] Brain v3 loaded (' + BRAIN_V3_TEXT.length + ' chars)');
+    BIANCA_PROMPT_TEXT = fs.readFileSync(path.join(__dirname, 'bianca-prompt-slim.md'), 'utf8');
+    console.log('🧠 [bianca] Prompt loaded (' + BIANCA_PROMPT_TEXT.length + ' chars)');
   } catch (e) {
-    try {
-      BRAIN_V3_TEXT = fs.readFileSync(path.join(__dirname, 'chatbot-brain-v3.md'), 'utf8');
-      console.log('🧠 [bianca] Brain v3 loaded (local)');
-    } catch (e2) {
-      console.error('❌ [bianca] Failed to load brain v3:', e2.message);
-      BRAIN_V3_TEXT = 'You are Bianca, a flirty confident woman on OnlyFans.';
-    }
+    console.error('❌ [bianca] Failed to load prompt:', e.message);
+    BIANCA_PROMPT_TEXT = 'You are Bianca, a flirty confident woman on OnlyFans.';
   }
 }
 
@@ -358,158 +346,91 @@ async function saveFanProfile(profile) {
   await R.set(`chatbot:bianca:fan:${profile.fanId}`, profile);
 }
 
-// ── Content Menu Builder (per-fan) ──────────────────────────────────────────
+// ── Content Summary Builder (per-fan) ──────────────────────────────────────
 
-function buildContentMenu(fanProfile) {
+function buildContentSummary(fanProfile) {
   if (!CONTENT_MAP) return 'Content map not loaded.';
 
   const lines = [];
-  lines.push('=== AVAILABLE CONTENT FOR THIS FAN ===\n');
-
-  // Free hooks
-  lines.push('FREE HOOKS (send to start conversations, build rapport):');
-  if (CONTENT_MAP.freeContent) {
-    for (const [key, item] of Object.entries(CONTENT_MAP.freeContent)) {
-      lines.push(`  - ${key}: ${item.name} (category ${item.categoryId})`);
-    }
-  }
-  // Sexting chain free previews
-  for (const [chain, data] of Object.entries(CONTENT_MAP.sextingChains || {})) {
-    const step0 = data.steps?.[0];
-    if (step0) lines.push(`  - ${chain}_pic1: ${step0.name} (FREE preview)`);
-  }
-
-  // Bundles
+  lines.push(`=== FAN CONTENT CONTEXT ===`);
+  lines.push(`Total spent: $${fanProfile.totalSpent.toFixed(2)} | Purchase count: ${fanProfile.purchaseCount || 0}`);
+  lines.push(`Estimated ceiling: $${fanProfile.estimatedCeiling || 15}`);
+  
   const sentBundles = new Set(fanProfile.sentBundles || []);
-  lines.push('\nBUNDLES (entry-level PPV, send whole category as a package):');
-  for (const bundle of (CONTENT_MAP.bundles || [])) {
-    const seen = sentBundles.has(bundle.id) ? '✓ SENT' : 'NOT SENT';
-    lines.push(`  - bundle_${bundle.id}: ${bundle.name} — ${bundle.description || ''} [${seen}]`);
-  }
+  const sentBundleCount = sentBundles.size;
+  lines.push(`Bundles sent: ${sentBundleCount}/${CONTENT_MAP.bundles?.length || 0}`);
 
-  // Sexting chains
-  lines.push('\nSEXTING CHAINS (sequential drip — NEVER skip steps):');
-  for (const [chain, data] of Object.entries(CONTENT_MAP.sextingChains || {})) {
-    const progress = fanProfile.sextingProgress?.[chain] || { currentStep: 0 };
-    const nextStep = progress.currentStep;
-    const stepData = data.steps?.[nextStep];
-    if (stepData) {
-      const priceStr = stepData.price === 0 ? 'FREE' : `$${stepData.price}`;
-      lines.push(`  - ${chain}: Fan is on STEP ${nextStep} — "${stepData.name}" (${priceStr})`);
-    } else {
-      lines.push(`  - ${chain}: Fan COMPLETED all steps`);
-    }
-  }
-
-  // Screenshots for upsell (proven spenders only)
-  if (fanProfile.totalSpent >= 50) {
-    lines.push('\nSCREENSHOTS FOR UPSELL (teaser PPVs — proven spenders only):');
-    for (const [key, upsell] of Object.entries(CONTENT_MAP.customUpsells || {})) {
-      if (upsell.screenshotCategoryId) {
-        lines.push(`  - screenshot_${key}: ${upsell.screenshotName} (category ${upsell.screenshotCategoryId})`);
+  // Show sexting progress
+  if (fanProfile.sextingProgress) {
+    for (const [chain, progress] of Object.entries(fanProfile.sextingProgress)) {
+      if (progress.currentStep > 0) {
+        lines.push(`${chain}: step ${progress.currentStep}`);
       }
     }
   }
 
-  // Custom upsells (high-ticket, $100+ spenders)
-  if (fanProfile.totalSpent >= 100) {
-    lines.push('\nCUSTOM UPSELL VIDEOS (high-ticket closers):');
-    for (const [key, upsell] of Object.entries(CONTENT_MAP.customUpsells || {})) {
-      lines.push(`  - upsell_${key}: ${upsell.fullName || upsell.name} (category ${upsell.categoryId})`);
-    }
-  }
-
-  // Body categories
-  if (fanProfile.totalSpent >= 30) {
-    lines.push('\nBODY CATEGORIES (supplemental):');
-    for (const [key, cat] of Object.entries(CONTENT_MAP.bodyCategories || {})) {
-      if (cat.tier === 'premium' && fanProfile.totalSpent < 200) continue;
-      if (cat.tier === 'high' && fanProfile.totalSpent < 100) continue;
-      lines.push(`  - body_${key}: ${cat.name} (category ${cat.categoryId})`);
-    }
-  }
-
-  lines.push('\nNEVER SELL categories (HARD BLOCK): ' + [...NEVER_SELL_CATEGORIES].join(', '));
+  lines.push('\nContent will be selected based on fan spend and conversation context.');
+  lines.push('Available levels: clothed/bikini → implied nude → topless → explicit');
+  lines.push(`Never sell categories: ${CONTENT_MAP.neverSell?.join(', ')}`);
 
   return lines.join('\n');
 }
 
 // ── Claude Integration ──────────────────────────────────────────────────────
 
-function buildSystemPrompt(fanProfile, contentMenu) {
+function buildSystemPrompt(fanProfile, conversation) {
   const now = new Date();
   const astTime = now.toLocaleString('en-US', { timeZone: 'America/Puerto_Rico', hour: 'numeric', minute: '2-digit', hour12: true, weekday: 'short' });
-  const astHour = parseInt(now.toLocaleString('en-US', { timeZone: 'America/Puerto_Rico', hour: 'numeric', hour12: false }));
-  const timeOfDay = astHour < 6 ? 'late night/early morning' : astHour < 12 ? 'morning' : astHour < 17 ? 'afternoon' : astHour < 21 ? 'evening' : 'nighttime';
 
-  return `${BRAIN_V3_TEXT}
+  // Build conversation context
+  let conversationText = '';
+  if (conversation && conversation.length > 0) {
+    conversationText = '\n\n=== CONVERSATION HISTORY ===\n';
+    conversation.slice(-10).forEach(msg => {
+      const role = msg.role === 'user' ? 'FAN' : 'BIANCA';
+      conversationText += `${role}: ${msg.content}\n`;
+    });
+  }
 
-=== FAN CONTEXT ===
-CURRENT TIME: ${astTime} (${timeOfDay})
-FAN ID: ${fanProfile.fanId}
-USERNAME: ${fanProfile.username || 'unknown'}
-BUYER TYPE: ${fanProfile.buyerType}
-TOTAL SPENT: $${fanProfile.totalSpent.toFixed(2)} (${fanProfile.purchaseCount} purchases)
-LAST PURCHASE: $${fanProfile.lastPurchasePrice}
-ESTIMATED CEILING: $${fanProfile.estimatedCeiling}
-IS TIMEWASTER: ${fanProfile.isTimewaster}
-MESSAGES FROM FAN: ${fanProfile.fanMessageCount}
-MESSAGES FROM BOT: ${fanProfile.botMessageCount}
-FIRST SEEN: ${fanProfile.firstSeenAt}
+  return `${BIANCA_PROMPT_TEXT}
 
-${contentMenu}
+## CURRENT CONTEXT
+Time: ${astTime}
+Fan ID: ${fanProfile.fanId}
+Fan spent: $${fanProfile.totalSpent.toFixed(2)} (${fanProfile.purchaseCount || 0} purchases)
+Estimated ceiling: $${fanProfile.estimatedCeiling || 15}
+Buyer type: ${fanProfile.buyerType || 'unknown'}
+Timewaster: ${fanProfile.isTimewaster ? 'YES' : 'NO'}
 
-=== RESPONSE FORMAT ===
-Respond with ONLY valid JSON. No text before or after.
-
-Format:
-{
-  "messages": [
-    { "text": "message text", "action": "message" },
-    { "text": "ppv caption", "action": "ppv", "contentCategory": "category_key", "price": 18 }
-  ],
-  "flag": null
+${buildContentSummary(fanProfile)}${conversationText}`;
 }
 
-If you need to flag for human review:
-{
-  "messages": [{ "text": "gentle deflection message", "action": "message" }],
-  "flag": { "reason": "self_harm_mention", "severity": "critical" }
-}
+// ── Direct Anthropic API ───────────────────────────────────────────────────
 
-RULES:
-- Max 1 PPV per response. Multiple text messages are fine (double/triple text).
-- contentCategory must be a vault category ID (number) or a key from the content menu above.
-- For sexting chains: use the EXACT category ID for the current step. NEVER skip steps.
-- For bundles: use the bundle category ID. The system will fetch all items from that category.
-- price must be a number. PPV cap is $100.
-- Keep messages SHORT (1-3 sentences). Use casual texting style.
-- Vary your responses. Don't repeat phrases.
-- NEVER use restricted words (account will be suspended).
-- NEVER describe PPV contents explicitly. Keep it mysterious.
-- CRITICAL: Read conversation history carefully. If you see "[SYSTEM: PPV SENT" in your previous messages, that PPV was ALREADY delivered. Do NOT re-pitch the same content. If the fan responds positively about a PPV you already sent, acknowledge it and move to the NEXT content tier. If they haven't opened it yet, use an unsend threat or gentle nudge — but NEVER send the same category again.`;
-}
+async function callAnthropicDirect(fanProfile, conversationHistory, newMessage) {
+  // Model selection based on fan value
+  const useOpus = fanProfile.totalSpent >= 50;
+  const model = useOpus ? 'claude-opus-4-20250514' : 'claude-sonnet-4-20250514';
+  
+  console.log(`🧠 [bianca] Using ${model} for fan ${fanProfile.fanId} ($${fanProfile.totalSpent})`);
 
-// ── Direct Anthropic API (Opus via api03 key) ──────────────────────────────
-
-const BIANCA_ANTHROPIC_KEY = process.env.BIANCA_ANTHROPIC_KEY || process.env.ANTHROPIC_API_KEY;
-const BIANCA_MODEL = 'claude-opus-4-20250514';
-
-async function callAnthropicDirect(systemPrompt, conversationHistory, newMessage) {
+  // Build conversation for API
   const messages = conversationHistory.map(m => ({ role: m.role, content: m.content }));
   messages.push({ role: 'user', content: newMessage });
+
+  const systemPrompt = buildSystemPrompt(fanProfile, conversationHistory);
 
   const res = await fetch('https://api.anthropic.com/v1/messages', {
     method: 'POST',
     headers: {
-      'x-api-key': BIANCA_ANTHROPIC_KEY,
+      'x-api-key': ANTHROPIC_API_KEY,
       'anthropic-version': '2023-06-01',
       'content-type': 'application/json',
     },
     body: JSON.stringify({
-      model: BIANCA_MODEL,
+      model,
       max_tokens: 1024,
-      system: [{ type: 'text', text: systemPrompt, cache_control: { type: 'ephemeral' } }],
+      system: systemPrompt,
       messages,
     }),
   });
@@ -531,7 +452,35 @@ async function callAnthropicDirect(systemPrompt, conversationHistory, newMessage
   try {
     // Strip markdown code fences if present
     const cleaned = text.replace(/^```json?\s*\n?/i, '').replace(/\n?```\s*$/i, '').trim();
-    return JSON.parse(cleaned);
+    const parsed = JSON.parse(cleaned);
+    
+    // Convert the prompt's action format to our internal format
+    if (parsed.action) {
+      const converted = { messages: [], flag: null };
+      
+      if (parsed.action === 'text') {
+        converted.messages.push({ text: parsed.message_text, action: 'message' });
+      } else if (parsed.action === 'ppv') {
+        converted.messages.push({
+          text: parsed.message_text,
+          action: 'ppv',
+          contentCategory: parsed.content_key,
+          price: parsed.price
+        });
+      } else if (parsed.action === 'free_media') {
+        converted.messages.push({
+          text: parsed.message_text,
+          action: 'free_media',
+          contentCategory: parsed.content_key
+        });
+      } else if (parsed.action === 'skip') {
+        return { skip: true, reason: parsed.reason };
+      }
+      
+      return converted;
+    }
+    
+    return parsed;
   } catch (e) {
     console.error('🚫 [bianca] Failed to parse Anthropic response as JSON:', text.substring(0, 200));
     // Return as plain text message
@@ -542,9 +491,12 @@ async function callAnthropicDirect(systemPrompt, conversationHistory, newMessage
 // ── Content Resolution ──────────────────────────────────────────────────────
 
 async function resolveContentCategory(contentCategory, fanProfile) {
-  // If it's a number, it's a direct vault category ID
   let categoryId = null;
+  let isFreePic = false;
 
+  if (!contentCategory) return { categoryId: null, vaultItems: [] };
+
+  // Direct category ID
   if (typeof contentCategory === 'number') {
     categoryId = contentCategory;
   } else if (typeof contentCategory === 'string') {
@@ -553,42 +505,60 @@ async function resolveContentCategory(contentCategory, fanProfile) {
     if (!isNaN(asNum) && String(asNum) === contentCategory) {
       categoryId = asNum;
     }
-    // Sexting chain step
-    else if (contentCategory.startsWith('sexting')) {
-      const match = contentCategory.match(/^(sexting\d)(?:_(?:pic|vid)(\d+))?$/);
-      if (match && CONTENT_MAP?.sextingChains?.[match[1]]) {
-        const chain = match[1];
-        const progress = fanProfile.sextingProgress?.[chain] || { currentStep: 0 };
-        const step = progress.currentStep;
-        const stepData = CONTENT_MAP.sextingChains[chain].steps?.[step];
-        if (stepData) {
-          categoryId = stepData.categoryId;
+    // Content map keys
+    else if (CONTENT_MAP) {
+      // Free content
+      if (CONTENT_MAP.freeContent?.[contentCategory]) {
+        categoryId = CONTENT_MAP.freeContent[contentCategory].categoryId;
+        isFreePic = true;
+      }
+      // Bundles by key (combo1, combo2, etc.)
+      else if (contentCategory.startsWith('combo')) {
+        const num = parseInt(contentCategory.replace('combo', ''));
+        const bundle = CONTENT_MAP.bundles?.find(b => b.name && b.name.includes(`Bundle ${num}`));
+        if (bundle) categoryId = bundle.id;
+      }
+      // Sexting chains
+      else if (contentCategory.startsWith('sexting')) {
+        const match = contentCategory.match(/^(sexting\d)(?:_(?:pic|vid)(\d+))?$/);
+        if (match) {
+          const chain = match[1];
+          const sextingData = CONTENT_MAP.sextingChains?.[chain];
+          if (sextingData) {
+            const progress = fanProfile.sextingProgress?.[chain] || { currentStep: 0 };
+            const step = progress.currentStep;
+            const stepData = sextingData.steps?.[step];
+            if (stepData) {
+              categoryId = stepData.categoryId;
+              isFreePic = stepData.price === 0;
+            }
+          }
         }
       }
-    }
-    // Bundle by ID prefix
-    else if (contentCategory.startsWith('bundle_')) {
-      const bundleId = parseInt(contentCategory.replace('bundle_', ''));
-      if (!isNaN(bundleId)) categoryId = bundleId;
-    }
-    // Body category
-    else if (contentCategory.startsWith('body_') && CONTENT_MAP?.bodyCategories) {
-      const key = contentCategory.replace('body_', '');
-      if (CONTENT_MAP.bodyCategories[key]) categoryId = CONTENT_MAP.bodyCategories[key].categoryId;
-    }
-    // Screenshot
-    else if (contentCategory.startsWith('screenshot_') && CONTENT_MAP?.customUpsells) {
-      const key = contentCategory.replace('screenshot_', '');
-      if (CONTENT_MAP.customUpsells[key]) categoryId = CONTENT_MAP.customUpsells[key].screenshotCategoryId;
-    }
-    // Upsell
-    else if (contentCategory.startsWith('upsell_') && CONTENT_MAP?.customUpsells) {
-      const key = contentCategory.replace('upsell_', '');
-      if (CONTENT_MAP.customUpsells[key]) categoryId = CONTENT_MAP.customUpsells[key].categoryId;
-    }
-    // Free content
-    else if (CONTENT_MAP?.freeContent?.[contentCategory]) {
-      categoryId = CONTENT_MAP.freeContent[contentCategory].categoryId;
+      // Body categories
+      else if (CONTENT_MAP.bodyCategories?.[contentCategory]) {
+        categoryId = CONTENT_MAP.bodyCategories[contentCategory].categoryId;
+      }
+      // Custom upsells
+      else if (CONTENT_MAP.customUpsells?.[contentCategory]) {
+        categoryId = CONTENT_MAP.customUpsells[contentCategory].categoryId;
+      }
+      // Custom tiers (custom_tier1, etc.)
+      else if (contentCategory.startsWith('custom_tier')) {
+        const tierNum = contentCategory.replace('custom_tier', '');
+        const tier = CONTENT_MAP.customUpsells?.[`tier${tierNum}`];
+        if (tier) categoryId = tier.categoryId;
+      }
+      // Bundle by ID
+      else if (contentCategory.startsWith('bundle_')) {
+        const bundleId = parseInt(contentCategory.replace('bundle_', ''));
+        if (!isNaN(bundleId)) categoryId = bundleId;
+      }
+      // GFE selfie shorthand
+      else if (contentCategory === 'gfe_selfie') {
+        categoryId = CONTENT_MAP.freeContent?.gfeSelfies?.categoryId;
+        isFreePic = true;
+      }
     }
   }
 
@@ -597,13 +567,14 @@ async function resolveContentCategory(contentCategory, fanProfile) {
     return { categoryId: null, vaultItems: [] };
   }
 
-  if (NEVER_SELL_CATEGORIES.has(categoryId)) {
+  // Check never-sell list
+  if (CONTENT_MAP?.neverSell?.includes(categoryId)) {
     console.error(`🚫 [bianca] BLOCKED: Claude tried to send from never-sell category ${categoryId}`);
     return { categoryId: null, vaultItems: [] };
   }
 
   const vaultItems = await fetchVaultItems(categoryId);
-  return { categoryId, vaultItems };
+  return { categoryId, vaultItems, isFreePic };
 }
 
 // ── Message Sending ─────────────────────────────────────────────────────────
@@ -708,13 +679,16 @@ async function processFanMessage(fanId, messageText) {
       return;
     }
 
-    // Build content menu + system prompt
-    const contentMenu = buildContentMenu(fanProfile);
-    const systemPrompt = buildSystemPrompt(fanProfile, contentMenu);
-
-    // Call Anthropic directly (Opus via api03 key)
-    console.log(`🧠 [bianca] Calling Anthropic for fan ${fanId}...`);
-    const aiResponse = await callAnthropicDirect(systemPrompt, convHistory.slice(-30), messageText);
+    // Call Claude API
+    console.log(`🧠 [bianca] Calling Claude for fan ${fanId}...`);
+    const aiResponse = await callAnthropicDirect(fanProfile, convHistory.slice(-20), messageText);
+    
+    if (aiResponse.skip) {
+      console.log(`⏭️ [bianca] Skipping fan ${fanId}: ${aiResponse.reason}`);
+      await saveFanProfile(fanProfile);
+      return;
+    }
+    
     console.log(`🧠 [bianca] Got response for fan ${fanId}: ${JSON.stringify(aiResponse).substring(0, 200)}`);
 
     // Execute the response (send messages + PPVs)
@@ -723,7 +697,7 @@ async function processFanMessage(fanId, messageText) {
 
   } catch (e) {
     stats.errors++;
-    console.error(`❌ [bianca] Error queuing fan ${fanId}:`, e.message);
+    console.error(`❌ [bianca] Error processing fan ${fanId}:`, e.message);
   }
 }
 
@@ -765,22 +739,33 @@ async function executeRelayResponse(fanId, response) {
     for (const msg of messages) {
       if (!msg.text && !msg.action) continue;
 
-      if (msg.action === 'ppv' && !ppvSentThisTurn) {
-        const { categoryId, vaultItems } = await resolveContentCategory(msg.contentCategory, fanProfile);
-        const price = Math.min(Math.max(msg.price || 15, 1), 100);
+      if ((msg.action === 'ppv' || msg.action === 'free_media') && !ppvSentThisTurn) {
+        const { categoryId, vaultItems, isFreePic } = await resolveContentCategory(msg.contentCategory, fanProfile);
 
         if (vaultItems.length > 0 && categoryId) {
           try {
-            await sendPPVMessage(fanId, msg.text || 'just for u 🙈', price, vaultItems);
-            ppvSentThisTurn = true;
-            stats.ppvsSent++;
-            stats.ppvRevenue += price;
+            if (msg.action === 'free_media' || isFreePic) {
+              // Send as free media
+              await sendMediaMessage(fanId, msg.text || 'just for u 💕', vaultItems);
+              botResponseParts.push({ text: msg.text, action: 'free_media', category: categoryId, itemCount: vaultItems.length });
+              console.log(`💕 [bianca] Free media sent to ${fanId} [cat ${categoryId}] ${vaultItems.length} items`);
+            } else {
+              // Send as PPV
+              const price = Math.min(Math.max(msg.price || 15, 1), 100);
+              await sendPPVMessage(fanId, msg.text || 'just for u 🙈', price, vaultItems);
+              ppvSentThisTurn = true;
+              stats.ppvsSent++;
+              stats.ppvRevenue += price;
 
-            fanProfile.priceHistory = fanProfile.priceHistory || [];
-            fanProfile.priceHistory.push({
-              offered: price, opened: false,
-              ts: new Date().toISOString(), category: String(categoryId),
-            });
+              fanProfile.priceHistory = fanProfile.priceHistory || [];
+              fanProfile.priceHistory.push({
+                offered: price, opened: false,
+                ts: new Date().toISOString(), category: String(categoryId),
+              });
+
+              botResponseParts.push({ text: msg.text, action: 'ppv', category: categoryId, price, itemCount: vaultItems.length });
+              console.log(`💰 [bianca] PPV sent to ${fanId}: $${price} [cat ${categoryId}] ${vaultItems.length} items`);
+            }
 
             // Update sexting progress
             if (msg.contentCategory && typeof msg.contentCategory === 'string' && msg.contentCategory.startsWith('sexting')) {
@@ -795,10 +780,8 @@ async function executeRelayResponse(fanId, response) {
               fanProfile.sentBundles.push(categoryId);
             }
 
-            botResponseParts.push({ text: msg.text, action: 'ppv', category: categoryId, price, itemCount: vaultItems.length });
-            console.log(`💰 [bianca] PPV sent to ${fanId}: $${price} [cat ${categoryId}] ${vaultItems.length} items`);
           } catch (e) {
-            console.error(`❌ [bianca] PPV send failed:`, e.message);
+            console.error(`❌ [bianca] Media send failed:`, e.message);
             if (msg.text) {
               await sendTextMessage(fanId, msg.text);
               botResponseParts.push({ text: msg.text, action: 'message' });
@@ -812,10 +795,10 @@ async function executeRelayResponse(fanId, response) {
           }
           console.warn(`⚠️ [bianca] No vault items for category ${msg.contentCategory}`);
         }
-      } else if (msg.action === 'ppv' && ppvSentThisTurn) {
+      } else if ((msg.action === 'ppv' || msg.action === 'free_media') && ppvSentThisTurn) {
         if (msg.text) {
           await sendTextMessage(fanId, msg.text);
-          botResponseParts.push({ text: msg.text, action: 'message (ppv_skipped)' });
+          botResponseParts.push({ text: msg.text, action: 'message (media_skipped)' });
         }
       } else {
         if (msg.text) {
@@ -1143,59 +1126,56 @@ async function runRetargetLoop() {
       }
 
       // Build retarget message via Claude
-      const contentMenu = buildContentMenu(profile);
-      const systemPrompt = buildSystemPrompt(profile, contentMenu) +
-        '\n\n=== SPECIAL INSTRUCTION ===\nThis fan is a DORMANT SPENDER being re-engaged. They spent $' +
-        profile.totalSpent.toFixed(2) + ' previously but have been inactive. ' +
-        'Send a warm, personal re-engagement message. Reference their history if possible. ' +
-        'DO NOT send PPV in this message — just reconnect. Keep it natural and personal.';
-
       const convHistory = await R.get(`chatbot:bianca:conv:${fanId}`) || [];
-      convHistory.push({ role: 'user', content: '[SYSTEM: Fan has been dormant. Send re-engagement message.]' });
+      
+      // For retargeting, we'll use a simple template rather than calling Claude
+      const retargetMessages = [
+        'heyy been thinking about u 💕',
+        'miss talking to u 🥺',
+        'hey stranger... remember me? 😏',
+        'bored rn and thought of u 💕 how have u been?',
+        'hiii 👋 been forever since we talked',
+      ];
+      
+      const retargetText = retargetMessages[Math.floor(Math.random() * retargetMessages.length)];
 
       try {
-        const { parsed, latencyMs } = await callClaude(systemPrompt, convHistory);
-        const messages = parsed.messages || [parsed];
-        const msg = messages[0];
-
-        if (msg?.text) {
-          // Check restricted
-          const restricted = containsRestricted(msg.text);
-          if (restricted) {
-            console.warn(`⚠️ [bianca] Restricted word in retarget for ${fanId}, skipping`);
-            continue;
-          }
-
-          await sendTextMessage(fanId, msg.text);
-          stats.retargetsSent++;
-          stats.messagesSent++;
-          stats.lastActivityAt = new Date().toISOString();
-
-          // Update retarget state
-          retargetState.retargetedToday.push(fanId);
-          retargetState.retargetCount++;
-          retargetState.fanCooldowns[fanId] = retargetState.fanCooldowns[fanId] || { attempts: 0 };
-          retargetState.fanCooldowns[fanId].attempts++;
-          retargetState.fanCooldowns[fanId].lastAt = new Date().toISOString();
-          if (retargetState.fanCooldowns[fanId].attempts >= 2) {
-            const cooldownDate = new Date();
-            cooldownDate.setDate(cooldownDate.getDate() + 30);
-            retargetState.fanCooldowns[fanId].cooldownUntil = cooldownDate.toISOString().slice(0, 10);
-          }
-
-          // Update profile
-          profile.retargetCount = (profile.retargetCount || 0) + 1;
-          profile.lastRetargetAt = new Date().toISOString();
-          await saveFanProfile(profile);
-
-          // Update conversation
-          convHistory.push({ role: 'assistant', content: msg.text });
-          await R.set(`chatbot:bianca:conv:${fanId}`, convHistory.slice(-50));
-
-          console.log(`🎯 [bianca] Retargeted fan ${fanId}: "${msg.text.substring(0, 60)}..."`);
+        // Check restricted
+        const restricted = containsRestricted(retargetText);
+        if (restricted) {
+          console.warn(`⚠️ [bianca] Restricted word in retarget template, skipping`);
+          continue;
         }
+
+        await sendTextMessage(fanId, retargetText);
+        stats.retargetsSent++;
+        stats.messagesSent++;
+        stats.lastActivityAt = new Date().toISOString();
+
+        // Update retarget state
+        retargetState.retargetedToday.push(fanId);
+        retargetState.retargetCount++;
+        retargetState.fanCooldowns[fanId] = retargetState.fanCooldowns[fanId] || { attempts: 0 };
+        retargetState.fanCooldowns[fanId].attempts++;
+        retargetState.fanCooldowns[fanId].lastAt = new Date().toISOString();
+        if (retargetState.fanCooldowns[fanId].attempts >= 2) {
+          const cooldownDate = new Date();
+          cooldownDate.setDate(cooldownDate.getDate() + 30);
+          retargetState.fanCooldowns[fanId].cooldownUntil = cooldownDate.toISOString().slice(0, 10);
+        }
+
+        // Update profile
+        profile.retargetCount = (profile.retargetCount || 0) + 1;
+        profile.lastRetargetAt = new Date().toISOString();
+        await saveFanProfile(profile);
+
+        // Update conversation
+        convHistory.push({ role: 'assistant', content: retargetText });
+        await R.set(`chatbot:bianca:conv:${fanId}`, convHistory.slice(-50));
+
+        console.log(`🎯 [bianca] Retargeted fan ${fanId}: "${retargetText}"`);
       } catch (e) {
-        console.error(`❌ [bianca] Retarget Claude error for ${fanId}:`, e.message);
+        console.error(`❌ [bianca] Retarget send error for ${fanId}:`, e.message);
       }
 
       await new Promise(r => setTimeout(r, 5000)); // Pace retargets
@@ -1252,7 +1232,7 @@ async function startChatbot(redisClient) {
 
   // Load resources
   loadContentMap();
-  loadBrainV3();
+  loadBiancaPrompt();
 
   // Resolve account
   await resolveAccountId();
@@ -1421,7 +1401,7 @@ async function unexcludeHandler(req, res) {
 // Called from index.js when a webhook event arrives for biancawoods
 
 function handleWebhookEvent(event, payload) {
-  // Works in both full mode and webhook-only mode
+  if (!isRunning) return;
 
   if (event === 'subscriptions.new') {
     const fanId = String(payload?.fanId || payload?.user_id || payload?.user?.id || '');
@@ -1432,15 +1412,20 @@ function handleWebhookEvent(event, payload) {
           if (await R.sismember('chatbot:bianca:welcomed_fans', fanId)) return;
           if (await isExcludedFan(fanId)) { await R.sadd('chatbot:bianca:welcomed_fans', fanId); return; }
 
-          // Send welcome with GFE selfie
-          const GFE_SELFIES = ["4129214996", "4129214993", "4118094231", "4118094226", "4113019829", "4113019824", "4113019823", "4113019822", "4113019819", "4112955857", "4112955856"];
-          const selfie = GFE_SELFIES[Math.floor(Math.random() * GFE_SELFIES.length)];
-          const welcomeText = WELCOME_TEMPLATES[Math.floor(Math.random() * WELCOME_TEMPLATES.length)];
-          
-          await sendMediaMessage(fanId, welcomeText, [selfie]);
-          await R.sadd('chatbot:bianca:welcomed_fans', fanId);
-          stats.welcomesSent++;
-          console.log(`👋 [bianca] Welcomed new sub ${fanId} with selfie`);
+          // Send welcome with GFE selfie (from free content)
+          const gfeSelfieId = CONTENT_MAP?.freeContent?.gfeSelfies?.categoryId;
+          if (gfeSelfieId) {
+            const vaultItems = await fetchVaultItems(gfeSelfieId, 5);
+            if (vaultItems.length > 0) {
+              const randomSelfie = vaultItems[Math.floor(Math.random() * vaultItems.length)];
+              const welcomeText = WELCOME_TEMPLATES[Math.floor(Math.random() * WELCOME_TEMPLATES.length)];
+              
+              await sendMediaMessage(fanId, welcomeText, [randomSelfie]);
+              await R.sadd('chatbot:bianca:welcomed_fans', fanId);
+              stats.welcomesSent++;
+              console.log(`👋 [bianca] Welcomed new sub ${fanId} with GFE selfie`);
+            }
+          }
         } catch (e) {
           console.error(`❌ [bianca] Welcome error for ${fanId}:`, e.message);
         }
@@ -1489,6 +1474,10 @@ function handleWebhookEvent(event, payload) {
         }
       })();
     }
+  }
+
+  if (event === 'webhooks.test') {
+    console.log(`🔔 [bianca] Webhook test received:`, payload);
   }
 }
 

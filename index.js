@@ -2951,6 +2951,11 @@ app.post('/webhooks/onlyfans', async (req, res) => {
           await redis.set(`webhook:msg:${account_id}:${fanId}`, '__NEW_SUBSCRIBER__', { ex: 86400 });
         }
       }
+
+      // Bianca Chatbot: handle new subscription
+      if (account_id === BIANCA_ACCOUNT_ID_CONST) {
+        biancaChatbot.handleWebhookEvent(event, payload);
+      }
     }
 
     if (event === 'messages.received') {
@@ -2985,6 +2990,11 @@ app.post('/webhooks/onlyfans', async (req, res) => {
             console.error('❌ Chatbot handler error:', e.message);
           });
         }
+      }
+
+      // Bianca Chatbot: handle biancawoods messages
+      if (account_id === BIANCA_ACCOUNT_ID_CONST) {
+        biancaChatbot.handleWebhookEvent(event, payload);
       }
     }
 
@@ -3088,6 +3098,11 @@ app.post('/webhooks/onlyfans', async (req, res) => {
             console.error(`❌ Post-purchase follow-up error for fan ${fanId}:`, e.message);
           }
         }, delay);
+      }
+
+      // Bianca Chatbot: handle PPV unlock
+      if (account_id === BIANCA_ACCOUNT_ID_CONST) {
+        biancaChatbot.handleWebhookEvent(event, payload);
       }
     }
   } catch (e) {
