@@ -4242,7 +4242,8 @@ app.get('/smart-link-roi/:linkId', async (req, res) => {
     
     // Store per-fan transaction ledger (merge with existing)
     const ledgerKey = `roi:${linkId}:ledger`;
-    const existingLedger = JSON.parse(await redis.get(ledgerKey) || '{}');
+    const rawLedger = await redis.get(ledgerKey);
+    const existingLedger = typeof rawLedger === 'string' ? JSON.parse(rawLedger) : (rawLedger || {});
     
     // Merge direct transactions
     for (const t of directResults) {
@@ -4260,7 +4261,8 @@ app.get('/smart-link-roi/:linkId', async (req, res) => {
     
     // Track link in the index
     const indexKey = 'roi:links';
-    const index = JSON.parse(await redis.get(indexKey) || '{}');
+    const rawIndex = await redis.get(indexKey);
+    const index = typeof rawIndex === 'string' ? JSON.parse(rawIndex) : (rawIndex || {});
     index[linkId] = {
       name: link.name,
       account: linkAccountUsername,
@@ -4283,15 +4285,27 @@ app.get('/smart-link-roi/:linkId', async (req, res) => {
 
 // Get cached ROI result (instant, no API calls)
 app.get('/smart-link-roi/:linkId/cached', async (req, res) => {
-  const cached = await redis.get(`roi:${req.params.linkId}:latest`);
-  if (!cached) return res.status(404).json({ error: 'No cached data. Run a live scan first: GET /smart-link-roi/:linkId?adSpend=X' });
-  res.json(JSON.parse(cached));
+  try {
+    const cached = await redis.get(`roi:${req.params.linkId}:latest`);
+    if (!cached) return res.status(404).json({ error: 'No cached data. Run a live scan first: GET /smart-link-roi/:linkId?adSpend=X' });
+    const result = typeof cached === 'string' ? JSON.parse(cached) : cached;
+    res.json(result);
+  } catch (e) {
+    console.error('ROI cached error:', e.message);
+    res.status(500).json({ error: e.message });
+  }
 });
 
 // List all tracked smart links
 app.get('/smart-link-roi', async (req, res) => {
-  const index = JSON.parse(await redis.get('roi:links') || '{}');
-  res.json({ links: Object.entries(index).map(([id, data]) => ({ id, ...data })) });
+  try {
+    const raw = await redis.get('roi:links');
+    const index = typeof raw === 'string' ? JSON.parse(raw) : (raw || {});
+    res.json({ links: Object.entries(index).map(([id, data]) => ({ id, ...data })) });
+  } catch (e) {
+    console.error('ROI list error:', e.message);
+    res.json({ links: [], error: e.message });
+  }
 });
 
 app.get('/models-status', async (req, res) => {
