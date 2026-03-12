@@ -4024,10 +4024,14 @@ app.get('/smart-link-roi/:linkId', async (req, res) => {
     const actualAdSpend = adSpend || parseFloat(link.cost?.perPromo || '0') || 0;
 
     // Step 2: Get all conversions from smart link (paginate)
+    // Use date_start from link creation to avoid missing early conversions
+    const linkCreatedAt = link.created_at || link.createdAt || '2026-01-01';
+    const dateStart = linkCreatedAt.split('T')[0];
+    const dateEnd = new Date().toISOString().split('T')[0];
     let allConversions = [];
     let offset = 0;
     while (true) {
-      const cRes = await fetch(`${OF_API_BASE}/${linkAccountId}/smart-links/${linkId}/conversions?limit=100&offset=${offset}`, {
+      const cRes = await fetch(`${OF_API_BASE}/smart-links/${linkId}/conversions?limit=100&offset=${offset}&date_start=${dateStart}&date_end=${dateEnd}&include_duplicates=true`, {
         headers: { 'Authorization': `Bearer ${OF_API_KEY}` }
       });
       const cData = await cRes.json();
