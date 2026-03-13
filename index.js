@@ -866,7 +866,7 @@ function isApprovedModel(username) {
 const PROMOTER_ONLY = new Set([]);
 
 // Models that promote others but are never promoted/tagged THEMSELVES (regular schedule, not boosted like PROMOTER_ONLY)
-const NO_PROMOTE = new Set(['jennaamitchell']);
+const NO_PROMOTE = new Set(['jennaamitchell', 'skyyroseee']);
 
 // Models that use ARCHIVE instead of DELETE for ghost tags (paid pages have OF delete limits)
 const ARCHIVE_INSTEAD_OF_DELETE = new Set(['jennaamitchell']);
