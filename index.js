@@ -3889,6 +3889,12 @@ app.post('/start', async (req, res) => {
   console.log('🚀 Starting rotation service...');
   isRunning = true;
   rotationState.stats.startedAt = new Date().toISOString();
+  
+  // Clear circuit breaker on start
+  DELETE_CIRCUIT_BREAKER.consecutiveFailures = 0;
+  DELETE_CIRCUIT_BREAKER.trippedAt = null;
+  DELETE_CIRCUIT_BREAKER.lastFailure = null;
+  
   await redis.set('s4s:rotation-enabled', true);
   
   // Process any overdue deletes first
@@ -3907,6 +3913,14 @@ app.post('/start', async (req, res) => {
     models: models.length,
     message: `Rotation started for ${models.length} models`
   });
+});
+
+app.post('/circuit-breaker/reset', (req, res) => {
+  DELETE_CIRCUIT_BREAKER.consecutiveFailures = 0;
+  DELETE_CIRCUIT_BREAKER.trippedAt = null;
+  DELETE_CIRCUIT_BREAKER.lastFailure = null;
+  console.log('🔧 Circuit breaker manually reset');
+  res.json({ status: 'reset', circuitBreaker: DELETE_CIRCUIT_BREAKER });
 });
 
 app.post('/stop', async (req, res) => {
