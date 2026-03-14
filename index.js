@@ -1040,8 +1040,17 @@ async function executeTag(promoter, target, vaultId, accountId) {
     
     // Verify post has caption — OF API sometimes drops text silently
     const postText = data.text || data.data?.text || '';
-    if (postText.length === 0 || !postText.includes('@')) {
-      console.warn(`⚠️ Post ${postId} for ${promoter} → ${target} may have missing caption (got: "${postText}"). Sent: "${caption}"`);
+    if (postText.length === 0 || !postText.includes('@') || (postText.trim() === `@${target}` || postText.trim().length < 10)) {
+      console.warn(`⚠️ Post ${postId} for ${promoter} → ${target} has stripped/missing caption (got: "${postText}"). Deleting and retrying...`);
+      // Delete the bad post and retry once
+      try {
+        await deletePost(postId, accountId);
+        await new Promise(r => setTimeout(r, 5000));
+        // Return null to signal caller to retry
+        return { retryNeeded: true, badPostId: postId };
+      } catch (retryErr) {
+        console.error(`Failed to cleanup stripped-caption post ${postId}:`, retryErr.message);
+      }
     }
     
     console.log(`✅ Posted: ${promoter} → @${target} (post ${postId}, caption: "${caption.substring(0, 40)}...")`);
@@ -1063,7 +1072,32 @@ async function deletePost(postId, accountId, _retryCount = 0) {
     });
     
     if (res.ok) {
-      console.log(`🗑️ Deleted post ${postId}${_retryCount > 0 ? ` (retry #${_retryCount})` : ''}`);
+      // Verify the post is actually gone (OF sometimes says OK but keeps it)
+      await new Promise(r => setTimeout(r, 15000));
+      try {
+        const verifyRes = await fetch(`${OF_API_BASE}/${accountId}/posts/${postId}`, {
+          headers: { 'Authorization': `Bearer ${OF_API_KEY}` }
+        });
+        if (verifyRes.status === 404) {
+          console.log(`🗑️✅ Verified deleted post ${postId}${_retryCount > 0 ? ` (retry #${_retryCount})` : ''}`);
+          DELETE_CIRCUIT_BREAKER.consecutiveFailures = 0;
+          return true;
+        }
+        const verifyData = await verifyRes.json().catch(() => ({}));
+        if (verifyData?.data?.id || verifyData?.id) {
+          console.warn(`⚠️ Post ${postId} still exists after "successful" delete! Retrying...`);
+          if (_retryCount < MAX_RETRIES) {
+            await new Promise(r => setTimeout(r, 10000));
+            return deletePost(postId, accountId, _retryCount + 1);
+          }
+          console.error(`❌ Post ${postId} STUCK — ${MAX_RETRIES} delete attempts all "succeeded" but post persists`);
+          onDeleteFailure(postId, accountId, 'ghost-persist');
+          return false;
+        }
+      } catch (verifyErr) {
+        // If verify fails, assume delete worked
+        console.log(`🗑️ Deleted post ${postId} (verify check failed: ${verifyErr.message})`);
+      }
       DELETE_CIRCUIT_BREAKER.consecutiveFailures = 0;
       return true;
     } else {
@@ -1217,7 +1251,20 @@ async function runRotationCycle() {
         continue;
       }
       
-      const postId = await executeTag(model, sched.target, vaultId, accountId);
+      let postId = await executeTag(model, sched.target, vaultId, accountId);
+      
+      // Handle caption-stripped retry
+      if (postId && typeof postId === 'object' && postId.retryNeeded) {
+        console.log(`🔄 Retrying tag ${model} → ${sched.target} after caption strip (bad post ${postId.badPostId})`);
+        await new Promise(r => setTimeout(r, 3000));
+        postId = await executeTag(model, sched.target, vaultId, accountId);
+        // If retry also returns retryNeeded, give up
+        if (postId && typeof postId === 'object' && postId.retryNeeded) {
+          console.error(`❌ Caption stripped twice for ${model} → ${sched.target}, giving up`);
+          postId = null;
+        }
+      }
+      
       sched.executed = true;
       
       if (postId) {
@@ -1568,6 +1615,62 @@ async function removePinnedPosts() {
   console.log(`📌 Removed ${removed}/${posts.length} pinned posts`);
   return { removed, total: posts.length };
 }
+
+// Verify pinned posts are still alive and pinned — recreate if missing
+async function verifyPinnedPosts() {
+  const pinnedState = await getPinnedState();
+  const posts = pinnedState.activePosts || [];
+  if (posts.length === 0) return { checked: 0, recreated: 0 };
+  
+  console.log(`📌 Verifying ${posts.length} pinned posts...`);
+  let recreated = 0;
+  
+  for (let i = 0; i < posts.length; i++) {
+    const post = posts[i];
+    try {
+      const res = await fetch(`${OF_API_BASE}/${post.accountId}/posts/${post.postId}`, {
+        headers: { 'Authorization': `Bearer ${OF_API_KEY}` }
+      });
+      
+      if (res.status === 404) {
+        console.warn(`📌⚠️ Pinned post ${post.postId} (${post.promoter} → @${post.featured}) is GONE! Recreating...`);
+        const vaultMappings = await filterToConnectedModels(await loadVaultMappings());
+        const vaultId = await getVaultIdForUse(post.promoter, post.featured, 'pinned', vaultMappings);
+        if (vaultId) {
+          const newPostId = await createPinnedPost(post.accountId, post.featured, vaultId);
+          if (newPostId) {
+            posts[i] = { ...post, postId: newPostId, createdAt: Date.now() };
+            recreated++;
+            console.log(`📌✅ Recreated pinned post for ${post.promoter} → @${post.featured}: ${newPostId}`);
+          }
+        }
+        await new Promise(r => setTimeout(r, 3000));
+      } else {
+        await new Promise(r => setTimeout(r, 1000));
+      }
+    } catch (e) {
+      console.error(`Failed to verify pinned post ${post.postId}:`, e.message);
+    }
+  }
+  
+  if (recreated > 0) {
+    pinnedState.activePosts = posts;
+    await savePinnedState(pinnedState);
+  }
+  
+  console.log(`📌 Verify complete: ${posts.length} checked, ${recreated} recreated`);
+  return { checked: posts.length, recreated };
+}
+
+// Run pinned post health check every 30 minutes
+cron.schedule('*/30 * * * *', async () => {
+  if (!isRunning) return;
+  try {
+    await verifyPinnedPosts();
+  } catch (e) {
+    console.error('Pinned post verify error:', e);
+  }
+});
 
 // Remove pinned posts older than 24 hours (active cleanup, doesn't rely on OF expiry)
 async function cleanupExpiredPinnedPosts() {
