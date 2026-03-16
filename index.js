@@ -4026,6 +4026,17 @@ app.post('/circuit-breaker/reset', (req, res) => {
   res.json({ status: 'reset', circuitBreaker: DELETE_CIRCUIT_BREAKER });
 });
 
+// Purge pending deletes for a specific model (promoter)
+app.post('/purge-pending/:username', async (req, res) => {
+  const username = req.params.username.toLowerCase();
+  const pending = await getPendingDeletes();
+  const keep = pending.filter(p => (p.promoter || '').toLowerCase() !== username);
+  const removed = pending.length - keep.length;
+  await redis.set(REDIS_KEYS.PENDING_DELETES, keep);
+  console.log(`🧹 Purged ${removed} pending deletes for ${username}`);
+  res.json({ ok: true, removed, remaining: keep.length });
+});
+
 app.post('/stop', async (req, res) => {
   console.log('⏹️ Stopping rotation service...');
   isRunning = false;
