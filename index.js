@@ -464,13 +464,69 @@ let rotationState = {
   }
 };
 
-// Delete circuit breaker — auto-stop if deletes keep failing
+// Delete circuit breaker — per-account tracking (no longer stops entire rotation)
 const DELETE_CIRCUIT_BREAKER = {
-  consecutiveFailures: 0,
-  threshold: 3,  // stop after 3 consecutive real failures
+  consecutiveFailures: 0,  // aggregate — for backwards compat
+  threshold: 3,
   lastFailure: null,
   trippedAt: null,
 };
+
+// Per-account circuit breaker: accountId → { consecutiveFailures, lastFailure, trippedAt, skippedSince }
+const perAccountCircuitBreaker = {};
+
+function getAccountBreaker(accountId) {
+  if (!perAccountCircuitBreaker[accountId]) {
+    perAccountCircuitBreaker[accountId] = { consecutiveFailures: 0, lastFailure: null, trippedAt: null, skippedSince: null };
+  }
+  return perAccountCircuitBreaker[accountId];
+}
+
+function isAccountTripped(accountId) {
+  const breaker = perAccountCircuitBreaker[accountId];
+  return breaker && breaker.consecutiveFailures >= DELETE_CIRCUIT_BREAKER.threshold;
+}
+
+function resetAccountBreaker(accountId) {
+  if (perAccountCircuitBreaker[accountId]) {
+    perAccountCircuitBreaker[accountId] = { consecutiveFailures: 0, lastFailure: null, trippedAt: null, skippedSince: null };
+  }
+}
+
+function updateGlobalBreakerStats() {
+  const trippedAccounts = Object.entries(perAccountCircuitBreaker).filter(([_, b]) => b.consecutiveFailures >= DELETE_CIRCUIT_BREAKER.threshold);
+  DELETE_CIRCUIT_BREAKER.consecutiveFailures = trippedAccounts.length;
+  DELETE_CIRCUIT_BREAKER.trippedAt = trippedAccounts.length > 0 ? trippedAccounts[0][1].trippedAt : null;
+  const allFailures = Object.values(perAccountCircuitBreaker).filter(b => b.lastFailure).sort((a, b) => (b.lastFailure?.ts || '') > (a.lastFailure?.ts || '') ? 1 : -1);
+  DELETE_CIRCUIT_BREAKER.lastFailure = allFailures[0]?.lastFailure || null;
+}
+
+// Set of accountIds to skip entirely (e.g. 401 session expired)
+const skipAccounts = new Set();
+
+// Fix 5: Persist skipAccounts to Redis
+async function persistSkipAccounts() {
+  try {
+    await redis.set('s4s:skip-accounts', JSON.stringify([...skipAccounts]));
+  } catch (e) {
+    console.error('Failed to persist skipAccounts:', e.message);
+  }
+}
+
+async function loadSkipAccountsFromRedis() {
+  try {
+    const raw = await redis.get('s4s:skip-accounts');
+    if (raw) {
+      const arr = JSON.parse(raw);
+      if (Array.isArray(arr)) {
+        for (const id of arr) skipAccounts.add(id);
+        if (arr.length > 0) console.log(`📋 Loaded ${arr.length} skipped accounts from Redis: ${arr.join(', ')}`);
+      }
+    }
+  } catch (e) {
+    console.error('Failed to load skipAccounts from Redis:', e.message);
+  }
+}
 
 // Ghost captions
 const GHOST_CAPTIONS = [
@@ -1002,6 +1058,12 @@ function getRandomCaption(targetUsername) {
 }
 
 async function executeTag(promoter, target, vaultId, accountId) {
+  // Skip accounts with expired sessions or tripped breakers
+  if (isAccountTripped(accountId) || skipAccounts.has(accountId)) {
+    console.log(`⏭️ Skipping tag ${promoter} → ${target}: account ${accountId} is tripped/skipped`);
+    return null;
+  }
+  
   // Safety: never post without a valid vault ID (prevents text-only promo posts)
   if (!vaultId || vaultId === 'null' || vaultId === 'undefined') {
     console.log(`🚫 BLOCKED tag ${promoter} → ${target}: no valid vault ID`);
@@ -1062,6 +1124,12 @@ async function executeTag(promoter, target, vaultId, accountId) {
 }
 
 async function deletePost(postId, accountId, _retryCount = 0) {
+  // Per-account circuit breaker: skip if this account is tripped
+  if (isAccountTripped(accountId)) {
+    console.log(`⏭️ Skipping delete of post ${postId} — account ${accountId} circuit breaker tripped`);
+    return false;
+  }
+
   const MAX_RETRIES = 3;
   const RETRY_DELAYS = [10000, 20000, 30000]; // 10s, 20s, 30s
   
@@ -1080,7 +1148,7 @@ async function deletePost(postId, accountId, _retryCount = 0) {
         });
         if (verifyRes.status === 404) {
           console.log(`🗑️✅ Verified deleted post ${postId}${_retryCount > 0 ? ` (retry #${_retryCount})` : ''}`);
-          DELETE_CIRCUIT_BREAKER.consecutiveFailures = 0;
+          resetAccountBreaker(accountId); skipAccounts.delete(accountId); updateGlobalBreakerStats();
           return true;
         }
         const verifyData = await verifyRes.json().catch(() => ({}));
@@ -1098,7 +1166,7 @@ async function deletePost(postId, accountId, _retryCount = 0) {
         // If verify fails, assume delete worked
         console.log(`🗑️ Deleted post ${postId} (verify check failed: ${verifyErr.message})`);
       }
-      DELETE_CIRCUIT_BREAKER.consecutiveFailures = 0;
+      resetAccountBreaker(accountId); skipAccounts.delete(accountId); updateGlobalBreakerStats();
       return true;
     } else {
       const err = await res.text();
@@ -1106,10 +1174,32 @@ async function deletePost(postId, accountId, _retryCount = 0) {
       if (res.status === 404 || err.includes('not found') || err.includes('already deleted') 
           || err.includes('Post not found')) {
         console.log(`🗑️ Post ${postId} already deleted (${res.status}), cleaning up`);
-        DELETE_CIRCUIT_BREAKER.consecutiveFailures = 0;
+        resetAccountBreaker(accountId); skipAccounts.delete(accountId); updateGlobalBreakerStats();
         return true;
       }
       
+      // 401 Session expired — immediately trip this account, no retries
+      if (res.status === 401) {
+        console.error(`🔒 Account ${accountId} session expired (401) — tripping circuit breaker and skipping account`);
+        const breaker = getAccountBreaker(accountId);
+        breaker.consecutiveFailures = DELETE_CIRCUIT_BREAKER.threshold;
+        breaker.trippedAt = new Date().toISOString();
+        breaker.skippedSince = new Date().toISOString();
+        breaker.lastFailure = { postId, accountId, reason: '401 Session Expired', ts: new Date().toISOString() };
+        skipAccounts.add(accountId);
+        updateGlobalBreakerStats();
+        persistSkipAccounts();
+        rotationState.stats.totalDeleteFailures++;
+        // Alert
+        const alertMsg = `🔒 S4S: Account ${accountId} (@${accountIdToUsername[accountId] || 'unknown'}) session expired (401)\n\nCircuit breaker tripped for this account only. Other accounts continue normally.\n\nPost ${postId} could not be deleted. Tell the OF API crew to refresh this session.`;
+        fetch(`https://api.telegram.org/bot${process.env.TELEGRAM_BOT_TOKEN}/sendMessage`, {
+          method: 'POST',
+          headers: { 'Content-Type': 'application/json' },
+          body: JSON.stringify({ chat_id: process.env.TELEGRAM_ALERT_CHAT_ID || '5505937268', text: alertMsg })
+        }).catch(e => console.error('Failed to send Telegram alert:', e));
+        return false;
+      }
+
       // 502/503 Proxy errors — immediate retry with backoff
       if ((res.status === 502 || res.status === 503) && _retryCount < MAX_RETRIES) {
         const delay = RETRY_DELAYS[_retryCount] || 30000;
@@ -1127,7 +1217,7 @@ async function deletePost(postId, accountId, _retryCount = 0) {
           const checkData = await checkRes.json();
           if (!checkData?.data?.id) {
             console.log(`🗑️ Post ${postId} confirmed gone after 500, cleaning up`);
-            DELETE_CIRCUIT_BREAKER.consecutiveFailures = 0;
+            resetAccountBreaker(accountId); skipAccounts.delete(accountId); updateGlobalBreakerStats();
             return true;
           }
           console.error(`❌ Post ${postId} still exists after delete 500 — real failure`);
@@ -1159,22 +1249,24 @@ async function deletePost(postId, accountId, _retryCount = 0) {
 
 // Circuit breaker: track delete failures, auto-stop rotation if threshold hit
 function onDeleteFailure(postId, accountId, reason) {
-  DELETE_CIRCUIT_BREAKER.consecutiveFailures++;
-  DELETE_CIRCUIT_BREAKER.lastFailure = { postId, accountId, reason, ts: new Date().toISOString() };
+  const breaker = getAccountBreaker(accountId);
+  breaker.consecutiveFailures++;
+  breaker.lastFailure = { postId, accountId, reason, ts: new Date().toISOString() };
   
   // Increment delete failure counter
   rotationState.stats.totalDeleteFailures++;
+  updateGlobalBreakerStats();
   
-  console.error(`🚨 Delete failure #${DELETE_CIRCUIT_BREAKER.consecutiveFailures}/${DELETE_CIRCUIT_BREAKER.threshold}: post ${postId} on ${accountId} — ${reason}`);
+  console.error(`🚨 Delete failure #${breaker.consecutiveFailures}/${DELETE_CIRCUIT_BREAKER.threshold} for account ${accountId}: post ${postId} — ${reason}`);
   
-  if (DELETE_CIRCUIT_BREAKER.consecutiveFailures >= DELETE_CIRCUIT_BREAKER.threshold) {
-    console.error(`🛑 CIRCUIT BREAKER TRIPPED — ${DELETE_CIRCUIT_BREAKER.consecutiveFailures} consecutive delete failures. Auto-stopping rotation to prevent orphaned posts.`);
-    DELETE_CIRCUIT_BREAKER.trippedAt = new Date().toISOString();
-    isRunning = false;
-    redis.set('s4s:rotation-enabled', false).catch(() => {});
+  if (breaker.consecutiveFailures >= DELETE_CIRCUIT_BREAKER.threshold && !breaker.trippedAt) {
+    breaker.trippedAt = new Date().toISOString();
+    breaker.skippedSince = new Date().toISOString();
+    console.error(`🛑 CIRCUIT BREAKER TRIPPED for account ${accountId} — ${breaker.consecutiveFailures} consecutive delete failures. Skipping this account only.`);
+    updateGlobalBreakerStats();
     
-    // Alert Kiefer via Telegram
-    const alertMsg = `🛑 S4S CIRCUIT BREAKER TRIPPED\n\n${DELETE_CIRCUIT_BREAKER.consecutiveFailures} consecutive delete failures — rotation auto-stopped.\n\nLast failure: post ${postId} on ${accountId}\nReason: ${reason}\n\nNo new posts will be created until manually restarted. Tell the OF API crew.`;
+    // Alert via Telegram — account-specific, rotation continues
+    const alertMsg = `🛑 S4S: Circuit breaker tripped for account ${accountId} (@${accountIdToUsername[accountId] || 'unknown'})\n\n${breaker.consecutiveFailures} consecutive delete failures — this account will be skipped.\n\nLast failure: post ${postId}\nReason: ${reason}\n\nAll other accounts continue normally. Reset with /circuit-breaker/reset/${accountId}`;
     fetch(`https://api.telegram.org/bot${process.env.TELEGRAM_BOT_TOKEN}/sendMessage`, {
       method: 'POST',
       headers: { 'Content-Type': 'application/json' },
@@ -1216,7 +1308,7 @@ async function runRotationCycle() {
           });
           success = archiveRes.ok || archiveRes.status === 404 || archiveRes.status === 400; // 400 = already archived
           console.log(`📦 Archived (paid page) post ${del.postId} for ${promoter}: ${archiveRes.status}`);
-          if (success) DELETE_CIRCUIT_BREAKER.consecutiveFailures = 0;
+          if (success) { resetAccountBreaker(del.accountId); skipAccounts.delete(del.accountId); updateGlobalBreakerStats(); }
         } catch (e) {
           console.error(`Failed to archive ${del.postId}:`, e.message);
           success = false;
@@ -1239,6 +1331,11 @@ async function runRotationCycle() {
   for (const [model, schedules] of Object.entries(rotationState.dailySchedule)) {
     const accountId = accountMap[model];
     if (!accountId) continue;
+    
+    // Skip tripped/401 accounts — don't create new tags we can't delete
+    if (isAccountTripped(accountId) || skipAccounts.has(accountId)) {
+      continue;
+    }
     
     for (const sched of schedules) {
       if (sched.executed) continue;
@@ -1293,6 +1390,37 @@ async function runRotationCycle() {
 }
 
 // === SCHEDULING ===
+
+// Fix 2: Auto-recovery probe for skipped accounts (every 30 min)
+cron.schedule('*/30 * * * *', async () => {
+  if (skipAccounts.size === 0) return;
+  console.log(`🔍 Probing ${skipAccounts.size} skipped account(s) for recovery...`);
+  for (const accountId of [...skipAccounts]) {
+    try {
+      const res = await fetch(`${OF_API_BASE}/${accountId}/me`, {
+        headers: { 'Authorization': `Bearer ${OF_API_KEY}` }
+      });
+      if (res.ok) {
+        const username = accountIdToUsername[accountId] || 'unknown';
+        console.log(`✅ Account ${accountId} (@${username}) recovered — removing from skip list`);
+        resetAccountBreaker(accountId);
+        skipAccounts.delete(accountId);
+        updateGlobalBreakerStats();
+        await persistSkipAccounts();
+        // Notify recovery
+        fetch(`https://api.telegram.org/bot${process.env.TELEGRAM_BOT_TOKEN}/sendMessage`, {
+          method: 'POST',
+          headers: { 'Content-Type': 'application/json' },
+          body: JSON.stringify({ chat_id: process.env.TELEGRAM_ALERT_CHAT_ID || '5505937268', text: `✅ S4S: Account ${accountId} (@${username}) has recovered and rejoined rotation automatically.` })
+        }).catch(() => {});
+      } else {
+        console.log(`⏭️ Account ${accountId} (@${accountIdToUsername[accountId] || 'unknown'}) still down (${res.status})`);
+      }
+    } catch (e) {
+      console.log(`⏭️ Account ${accountId} probe failed: ${e.message}`);
+    }
+  }
+});
 
 // Run rotation cycle every minute
 cron.schedule('* * * * *', runRotationCycle);
@@ -1416,6 +1544,12 @@ async function savePinnedState(state) {
 }
 
 async function createPinnedPost(promoterAccountId, targetUsername, vaultId) {
+  // Fix 1: Skip accounts with tripped breakers or 401s
+  if (skipAccounts.has(promoterAccountId) || isAccountTripped(promoterAccountId)) {
+    console.log(`⏭️ Skipping pinned post for @${targetUsername} — account ${promoterAccountId} (@${accountIdToUsername[promoterAccountId] || 'unknown'}) is tripped/skipped`);
+    return null;
+  }
+  
   const caption = getPinnedCaption(targetUsername);
   
   try {
@@ -1432,6 +1566,26 @@ async function createPinnedPost(promoterAccountId, targetUsername, vaultId) {
         expireDays: 1
       })
     });
+    
+    // Fix 1: Handle 401 in pinned post creation
+    if (res.status === 401) {
+      console.error(`🔒 Account ${promoterAccountId} (@${accountIdToUsername[promoterAccountId] || 'unknown'}) session expired (401) during pinned post`);
+      const breaker = getAccountBreaker(promoterAccountId);
+      breaker.consecutiveFailures = DELETE_CIRCUIT_BREAKER.threshold;
+      breaker.trippedAt = new Date().toISOString();
+      breaker.skippedSince = new Date().toISOString();
+      breaker.lastFailure = { accountId: promoterAccountId, reason: '401 Session Expired (pinned post)', ts: new Date().toISOString() };
+      skipAccounts.add(promoterAccountId);
+      updateGlobalBreakerStats();
+      await persistSkipAccounts();
+      const alertMsg = `🔒 S4S: Account ${promoterAccountId} (@${accountIdToUsername[promoterAccountId] || 'unknown'}) session expired (401) during pinned post creation for @${targetUsername}`;
+      fetch(`https://api.telegram.org/bot${process.env.TELEGRAM_BOT_TOKEN}/sendMessage`, {
+        method: 'POST',
+        headers: { 'Content-Type': 'application/json' },
+        body: JSON.stringify({ chat_id: process.env.TELEGRAM_ALERT_CHAT_ID || '5505937268', text: alertMsg })
+      }).catch(e => console.error('Failed to send Telegram alert:', e));
+      return null;
+    }
     
     if (!res.ok) {
       const err = await res.text();
@@ -3445,6 +3599,12 @@ async function getBiancaActiveChatters() {
 }
 
 async function sendMassDm(promoterUsername, targetUsername, vaultId, accountId) {
+  // Fix 1: Skip accounts with tripped breakers or 401s
+  if (skipAccounts.has(accountId) || isAccountTripped(accountId)) {
+    console.log(`⏭️ Skipping mass DM for ${promoterUsername} → @${targetUsername} — account ${accountId} (@${accountIdToUsername[accountId] || 'unknown'}) is tripped/skipped`);
+    return false;
+  }
+  
   const caption = getMassDmCaption(targetUsername);
   
   try {
@@ -3515,6 +3675,26 @@ async function sendMassDm(promoterUsername, targetUsername, vaultId, accountId) 
       console.log(`📨 Mass DM sent (after retry): ${promoterUsername} → @${targetUsername} (queue: ${retryQueueId})`);
       addToFeed(massDmFeed, { promoter: promoterUsername, target: targetUsername, queueId: retryQueueId, status: 'sent (retry)' });
       return { success: true, queueId: retryQueueId };
+    }
+    
+    // Fix 1: Handle 401 in mass DM — trip breaker
+    if (res.status === 401) {
+      console.error(`🔒 Account ${accountId} (@${accountIdToUsername[accountId] || 'unknown'}) session expired (401) during mass DM`);
+      const breaker = getAccountBreaker(accountId);
+      breaker.consecutiveFailures = DELETE_CIRCUIT_BREAKER.threshold;
+      breaker.trippedAt = new Date().toISOString();
+      breaker.skippedSince = new Date().toISOString();
+      breaker.lastFailure = { accountId, reason: '401 Session Expired (mass DM)', ts: new Date().toISOString() };
+      skipAccounts.add(accountId);
+      updateGlobalBreakerStats();
+      await persistSkipAccounts();
+      const alertMsg = `🔒 S4S: Account ${accountId} (@${accountIdToUsername[accountId] || 'unknown'}) session expired (401) during mass DM\n\nCircuit breaker tripped. Other accounts continue normally.\n\nMass DM ${promoterUsername} → @${targetUsername} failed.`;
+      fetch(`https://api.telegram.org/bot${process.env.TELEGRAM_BOT_TOKEN}/sendMessage`, {
+        method: 'POST',
+        headers: { 'Content-Type': 'application/json' },
+        body: JSON.stringify({ chat_id: process.env.TELEGRAM_ALERT_CHAT_ID || '5505937268', text: alertMsg })
+      }).catch(e => console.error('Failed to send Telegram alert:', e));
+      return false;
     }
     
     if (!res.ok) {
@@ -3993,15 +4173,73 @@ app.post('/start', async (req, res) => {
   isRunning = true;
   rotationState.stats.startedAt = new Date().toISOString();
   
-  // Clear circuit breaker on start
+  // Clear all circuit breakers on start
   DELETE_CIRCUIT_BREAKER.consecutiveFailures = 0;
   DELETE_CIRCUIT_BREAKER.trippedAt = null;
   DELETE_CIRCUIT_BREAKER.lastFailure = null;
+  for (const key of Object.keys(perAccountCircuitBreaker)) delete perAccountCircuitBreaker[key];
+  skipAccounts.clear();
+  await persistSkipAccounts();
   
   await redis.set('s4s:rotation-enabled', true);
   
   // Process any overdue deletes first
+  console.log('🗑️ Processing overdue deletes on start...');
   await processOverdueDeletes();
+  
+  // Orphan sweep: find and delete ghost tag posts older than 10 minutes
+  console.log('🧹 Running orphan sweep...');
+  try {
+    const rawVaultMappingsForSweep = await loadVaultMappings();
+    const vaultMappingsForSweep = await filterToConnectedModels(rawVaultMappingsForSweep);
+    const sweepModels = Object.keys(vaultMappingsForSweep);
+    const sweepAccountMap = await loadModelAccounts();
+    let orphansFound = 0;
+    let orphansDeleted = 0;
+    
+    // Fix 3: Parallel orphan sweep — batch 15 models at a time
+    const SWEEP_BATCH = 15;
+    const tenMinAgo = Date.now() - 10 * 60 * 1000;
+    const sweepPairs = sweepModels.map(m => ({ model: m, acctId: sweepAccountMap[m] })).filter(p => p.acctId);
+    
+    for (let i = 0; i < sweepPairs.length; i += SWEEP_BATCH) {
+      const batch = sweepPairs.slice(i, i + SWEEP_BATCH);
+      const results = await Promise.allSettled(batch.map(async ({ model, acctId }) => {
+        const postsRes = await fetch(`${OF_API_BASE}/${acctId}/posts?limit=10`, {
+          headers: { 'Authorization': `Bearer ${OF_API_KEY}` }
+        });
+        if (!postsRes.ok) return { found: 0, deleted: 0 };
+        const postsData = await postsRes.json();
+        const posts = postsData?.data || postsData || [];
+        if (!Array.isArray(posts)) return { found: 0, deleted: 0 };
+        
+        let found = 0, deleted = 0;
+        for (const post of posts) {
+          const text = post.text || post.rawText || '';
+          const postId = post.id || post.postId;
+          const createdAt = new Date(post.postedAt || post.createdAt || post.created_at || 0).getTime();
+          if (text.includes('@') && sweepModels.some(m => m !== model && text.toLowerCase().includes(`@${m.toLowerCase()}`)) && createdAt < tenMinAgo) {
+            found++;
+            console.log(`🧹 Orphan found: post ${postId} on ${model} — "${text.substring(0, 50)}..."`);
+            const ok = await deletePost(postId, acctId);
+            if (ok) deleted++;
+          }
+        }
+        return { found, deleted };
+      }));
+      
+      for (const r of results) {
+        if (r.status === 'fulfilled') {
+          orphansFound += r.value.found;
+          orphansDeleted += r.value.deleted;
+        }
+      }
+      if (i + SWEEP_BATCH < sweepPairs.length) await new Promise(r => setTimeout(r, 500));
+    }
+    console.log(`🧹 Orphan sweep complete: found ${orphansFound}, deleted ${orphansDeleted}`);
+  } catch (sweepErr) {
+    console.error('Orphan sweep failed:', sweepErr.message);
+  }
   
   // Generate initial schedule — filtered to OF API connected accounts only
   const rawVaultMappings = await loadVaultMappings();
@@ -4022,8 +4260,21 @@ app.post('/circuit-breaker/reset', (req, res) => {
   DELETE_CIRCUIT_BREAKER.consecutiveFailures = 0;
   DELETE_CIRCUIT_BREAKER.trippedAt = null;
   DELETE_CIRCUIT_BREAKER.lastFailure = null;
-  console.log('🔧 Circuit breaker manually reset');
+  for (const key of Object.keys(perAccountCircuitBreaker)) delete perAccountCircuitBreaker[key];
+  skipAccounts.clear();
+  persistSkipAccounts();
+  console.log('🔧 All circuit breakers manually reset');
   res.json({ status: 'reset', circuitBreaker: DELETE_CIRCUIT_BREAKER });
+});
+
+app.post('/circuit-breaker/reset/:accountId', (req, res) => {
+  const { accountId } = req.params;
+  resetAccountBreaker(accountId);
+  skipAccounts.delete(accountId);
+  updateGlobalBreakerStats();
+  persistSkipAccounts();
+  console.log(`🔧 Circuit breaker reset for account ${accountId}`);
+  res.json({ status: 'reset', accountId, breaker: perAccountCircuitBreaker[accountId] || null });
 });
 
 // Purge pending deletes for a specific model (promoter)
@@ -4548,6 +4799,12 @@ app.get('/stats', async (req, res) => {
       threshold: DELETE_CIRCUIT_BREAKER.threshold,
       trippedAt: DELETE_CIRCUIT_BREAKER.trippedAt,
       lastFailure: DELETE_CIRCUIT_BREAKER.lastFailure,
+      trippedAccountsCount: Object.values(perAccountCircuitBreaker).filter(b => b.consecutiveFailures >= DELETE_CIRCUIT_BREAKER.threshold).length,
+      trippedAccounts: Object.entries(perAccountCircuitBreaker)
+        .filter(([_, b]) => b.consecutiveFailures >= DELETE_CIRCUIT_BREAKER.threshold)
+        .map(([id, b]) => ({ accountId: id, ...b })),
+      skippedAccounts: [...skipAccounts],
+      perAccount: perAccountCircuitBreaker,
     }
   });
 });
@@ -5617,6 +5874,7 @@ app.listen(PORT, async () => {
   
   // Load skip models (removed from agency)
   await loadSkipModels();
+  await loadSkipAccountsFromRedis();
   await loadApprovedModels();
 
   // Load SFS exclude lists from Redis (seeds if needed)
