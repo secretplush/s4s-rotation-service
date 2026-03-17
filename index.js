@@ -1407,6 +1407,42 @@ cron.schedule('*/30 * * * *', async () => {
         skipAccounts.delete(accountId);
         updateGlobalBreakerStats();
         await persistSkipAccounts();
+        
+        // Trigger catch-up process for missed distributions
+        try {
+          console.log(`🔄 Triggering catch-up process for @${username}...`);
+          const catchUpRes = await fetch('https://s4s-app.vercel.app/api/catch-up', {
+            method: 'POST',
+            headers: { 'Content-Type': 'application/json' },
+            body: JSON.stringify({ username, accountId })
+          });
+          
+          if (catchUpRes.ok) {
+            const catchUpData = await catchUpRes.json();
+            if (catchUpData.caught_up > 0) {
+              const sourcesList = (catchUpData.results || []).filter((r) => r.success).map((r) => r.sourceUsername);
+              const telegramMsg = `✅ Auto-caught up @${username}: distributed ${catchUpData.caught_up} missed photos (${sourcesList.join(', ')})`;
+              console.log(telegramMsg);
+              
+              // Send catch-up success notification
+              fetch(`https://api.telegram.org/bot${process.env.TELEGRAM_BOT_TOKEN}/sendMessage`, {
+                method: 'POST',
+                headers: { 'Content-Type': 'application/json' },
+                body: JSON.stringify({ 
+                  chat_id: process.env.TELEGRAM_ALERT_CHAT_ID || '5505937268', 
+                  text: telegramMsg 
+                })
+              }).catch(() => {});
+            } else {
+              console.log(`🔄 Catch-up completed for @${username}: no pending distributions`);
+            }
+          } else {
+            console.error(`❌ Catch-up failed for @${username}: ${catchUpRes.status}`);
+          }
+        } catch (catchUpError) {
+          console.error(`❌ Catch-up request failed for @${username}:`, catchUpError);
+        }
+        
         // Notify recovery
         fetch(`https://api.telegram.org/bot${process.env.TELEGRAM_BOT_TOKEN}/sendMessage`, {
           method: 'POST',
