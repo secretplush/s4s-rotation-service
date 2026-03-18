@@ -517,7 +517,8 @@ async function loadSkipAccountsFromRedis() {
   try {
     const raw = await redis.get('s4s:skip-accounts');
     if (raw) {
-      const arr = JSON.parse(raw);
+      // Upstash auto-parses JSON, so raw might already be an array
+      const arr = Array.isArray(raw) ? raw : JSON.parse(raw);
       if (Array.isArray(arr)) {
         for (const id of arr) skipAccounts.add(id);
         if (arr.length > 0) console.log(`📋 Loaded ${arr.length} skipped accounts from Redis: ${arr.join(', ')}`);
