@@ -2494,41 +2494,6 @@ cron.schedule('0 */2 * * *', async () => {
   }
 });
 
-// Auto-approve models that have vault mappings but aren't in approved list yet (every 30 min)
-cron.schedule('*/30 * * * *', async () => {
-  try {
-    const vm = await loadVaultMappings();
-    const allInVault = new Set();
-    for (const [promoter, targets] of Object.entries(vm)) {
-      allInVault.add(promoter);
-      if (typeof targets === 'object') {
-        for (const t of Object.keys(targets)) allInVault.add(t);
-      }
-    }
-    // Also check v2
-    const v2 = await loadVaultMappingsV2();
-    if (v2) {
-      for (const [promoter, targets] of Object.entries(v2)) {
-        allInVault.add(promoter);
-        if (typeof targets === 'object') {
-          for (const t of Object.keys(targets)) allInVault.add(t);
-        }
-      }
-    }
-    // Find models in vault but not approved
-    const newModels = [...allInVault].filter(m => !APPROVED_MODELS.has(m));
-    if (newModels.length > 0) {
-      for (const m of newModels) {
-        await redis.sadd('s4s:approved_models', m);
-        APPROVED_MODELS.add(m);
-      }
-      console.log(`🆕 Auto-approved ${newModels.length} new models from vault mappings: ${newModels.join(', ')}`);
-    }
-  } catch (e) {
-    console.error('❌ Auto-approve from vault mappings error:', e.message);
-  }
-});
-
 // === CHATBOT SYSTEM ===
 
 // Load vault from API with correct endpoint, paginated. Cache 1hr in Redis.
