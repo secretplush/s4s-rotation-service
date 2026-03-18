@@ -30,6 +30,18 @@ const redis = new Redis({
 // Chatbot config
 const ANTHROPIC_API_KEY = process.env.ANTHROPIC_API_KEY;
 
+// API key for worker endpoint security
+const S4S_WORKER_API_KEY = process.env.S4S_WORKER_API_KEY || 's4s_worker_key_Plush2026!';
+
+// Middleware to check API key for sensitive endpoints
+function requireApiKey(req, res, next) {
+  const providedKey = req.headers['x-api-key'];
+  if (!providedKey || providedKey !== S4S_WORKER_API_KEY) {
+    return res.status(401).json({ error: 'Missing or invalid API key' });
+  }
+  next();
+}
+
 // Webhook stats (used by both webhook handler and stats endpoint)
 const webhookStats = { totalEvents: 0, byType: {}, lastEventAt: null };
 
@@ -914,8 +926,8 @@ async function loadApprovedModels() {
 }
 
 function isApprovedModel(username) {
-  // If no approved list exists, allow all (backwards compat during initial seed)
-  if (APPROVED_MODELS.size === 0) return true;
+  // If no approved list exists, deny all (secure default - dashboard must approve models)
+  if (APPROVED_MODELS.size === 0) return false;
   return APPROVED_MODELS.has(username);
 }
 
@@ -3495,7 +3507,7 @@ app.post('/webhooks/onlyfans', async (req, res) => {
 });
 
 // === EXCLUDE LIST STATUS ENDPOINT ===
-app.post('/exclude-lists/create', async (req, res) => {
+app.post('/exclude-lists/create', requireApiKey, async (req, res) => {
   try {
     console.log('📋 Manual trigger: creating exclude lists for all accounts...');
     await ensureAllExcludeLists();
@@ -3534,7 +3546,7 @@ app.get('/exclude-lists', async (req, res) => {
 });
 
 // Skip models management (remove from all S4S activity)
-app.post('/skip-model', async (req, res) => {
+app.post('/skip-model', requireApiKey, async (req, res) => {
   const { username } = req.body || {};
   if (!username) return res.status(400).json({ error: 'username required' });
   await redis.sadd('s4s:skip_models', username.toLowerCase());
@@ -3559,7 +3571,7 @@ app.get('/skip-models', async (req, res) => {
 });
 
 // Approved models management — only approved models participate in S4S
-app.post('/approve-model', async (req, res) => {
+app.post('/approve-model', requireApiKey, async (req, res) => {
   const { username } = req.body;
   if (!username) return res.status(400).json({ error: 'username required' });
   await redis.sadd('s4s:approved_models', username.toLowerCase());
@@ -3568,7 +3580,7 @@ app.post('/approve-model', async (req, res) => {
   res.json({ ok: true, approved: [...APPROVED_MODELS].sort() });
 });
 
-app.post('/approve-models-bulk', async (req, res) => {
+app.post('/approve-models-bulk', requireApiKey, async (req, res) => {
   const { usernames } = req.body;
   if (!usernames || !Array.isArray(usernames)) return res.status(400).json({ error: 'usernames array required' });
   const lower = usernames.map(u => u.toLowerCase());
@@ -3580,7 +3592,7 @@ app.post('/approve-models-bulk', async (req, res) => {
   res.json({ ok: true, added: lower.length, total: APPROVED_MODELS.size });
 });
 
-app.delete('/approve-model/:username', async (req, res) => {
+app.delete('/approve-model/:username', requireApiKey, async (req, res) => {
   const username = req.params.username.toLowerCase();
   await redis.srem('s4s:approved_models', username);
   APPROVED_MODELS.delete(username);
@@ -3590,6 +3602,20 @@ app.delete('/approve-model/:username', async (req, res) => {
 
 app.get('/approved-models', async (req, res) => {
   res.json({ approved: [...APPROVED_MODELS].sort(), count: APPROVED_MODELS.size });
+});
+
+// Model settings endpoint (called from dashboard)
+app.post('/model-settings', requireApiKey, async (req, res) => {
+  const { username, settings } = req.body;
+  if (!username || !settings) {
+    return res.status(400).json({ error: 'username and settings required' });
+  }
+  
+  // Store model settings in Redis for worker to use
+  await redis.set(`model_settings:${username}`, JSON.stringify(settings));
+  
+  console.log(`🎛️ Model settings updated for ${username}`);
+  res.json({ ok: true, username, settings });
 });
 
 // Debug: dump vault mapping model names (who has valid vaults)
@@ -3609,32 +3635,13 @@ app.get('/vault-models', async (req, res) => {
   }
 });
 
-// Auto-seed approved models from vault mappings
-app.post('/seed-approved-from-vaults', async (req, res) => {
-  try {
-    const vm = await loadVaultMappings();
-    const models = new Set();
-    for (const [promoter, targets] of Object.entries(vm)) {
-      models.add(promoter);
-      if (typeof targets === 'object') {
-        for (const t of Object.keys(targets)) models.add(t);
-      }
-    }
-    for (const m of models) {
-      await redis.sadd('s4s:approved_models', m);
-      APPROVED_MODELS.add(m);
-    }
-    console.log(`✅ Seeded ${models.size} approved models from vault mappings`);
-    res.json({ ok: true, seeded: models.size, approved: [...APPROVED_MODELS].sort() });
-  } catch (e) {
-    res.status(500).json({ error: e.message });
-  }
-});
+// NOTE: /seed-approved-from-vaults endpoint removed for security (Gap 4 fix)
+// Dashboard is the single source of truth for model approval
 
 // === REVERSE DISTRIBUTION ===
 // Upload existing models' promo photos into a new model's vault
 // Uses v2 vault IDs from a donor model, downloads CDN images, re-uploads to target
-app.post('/reverse-distribute', async (req, res) => {
+app.post('/reverse-distribute', requireApiKey, async (req, res) => {
   const { targetUsername, donorUsername } = req.body;
   if (!targetUsername || !donorUsername) {
     return res.status(400).json({ error: 'targetUsername and donorUsername required' });
@@ -4184,7 +4191,7 @@ app.get('/mass-dm/schedule', async (req, res) => {
   res.json({ date: data.date, schedule: summary });
 });
 
-app.post('/mass-dm/enable', async (req, res) => {
+app.post('/mass-dm/enable', requireApiKey, async (req, res) => {
   await redis.set('s4s:mass-dm-enabled', true);
   
   // Always regenerate schedule on enable so timing starts fresh from NOW
@@ -4257,7 +4264,7 @@ app.get('/mass-dm/sent', async (req, res) => {
   });
 });
 
-app.post('/mass-dm/disable', async (req, res) => {
+app.post('/mass-dm/disable', requireApiKey, async (req, res) => {
   await redis.set('s4s:mass-dm-enabled', false);
   res.json({ enabled: false, message: 'Mass DM system disabled — pending DMs will not be sent' });
 });
