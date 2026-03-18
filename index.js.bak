@@ -924,9 +924,9 @@ const PROMOTER_ONLY = new Set(['kybabyrae']);
 // Special per-model overrides (custom ghost tag frequency, disable mass DM/pinned, etc.)
 const SPECIAL_MODELS = {
   'kybabyrae': {
-    tagsPerDay: 24,
-    noMassDm: true,
-    noPinnedPost: true,
+    tagsPerDay: 24,       // 1 per hour instead of 240
+    noMassDm: true,       // no mass DMs
+    noPinnedPost: true,   // no pinned posts
     label: 'Promoter only · 24 tags/day · No DM/Pinned'
   }
 };
@@ -1709,7 +1709,7 @@ async function runPinnedPostRotation() {
   
   // Build promoter pool: all models shuffled, excluding models with noPinnedPost special rule
   const featuredSet = new Set(featuredGirls);
-  const promoterPool = allModels.filter(m => !SPECIAL_MODELS[m]?.noPinnedPost).sort(() => Math.random() - 0.5);
+  const promoterPool = allModels.filter(m => !SPECIAL_MODELS[m]?.noPinnedPost).sort(() => Math.random() - 0.5); // shuffle all
   
   // Load pin history: { featuredUsername: [promoter1, promoter2, ...] } (last used promoters)
   const pinHistory = (await redis.get('s4s:pin-history')) || {};
@@ -2491,41 +2491,6 @@ cron.schedule('0 */2 * * *', async () => {
     }
   } catch (e) {
     console.error('❌ Auto-detect new models error:', e.message);
-  }
-});
-
-// Auto-approve models that have vault mappings but aren't in approved list yet (every 30 min)
-cron.schedule('*/30 * * * *', async () => {
-  try {
-    const vm = await loadVaultMappings();
-    const allInVault = new Set();
-    for (const [promoter, targets] of Object.entries(vm)) {
-      allInVault.add(promoter);
-      if (typeof targets === 'object') {
-        for (const t of Object.keys(targets)) allInVault.add(t);
-      }
-    }
-    // Also check v2
-    const v2 = await loadVaultMappingsV2();
-    if (v2) {
-      for (const [promoter, targets] of Object.entries(v2)) {
-        allInVault.add(promoter);
-        if (typeof targets === 'object') {
-          for (const t of Object.keys(targets)) allInVault.add(t);
-        }
-      }
-    }
-    // Find models in vault but not approved
-    const newModels = [...allInVault].filter(m => !APPROVED_MODELS.has(m));
-    if (newModels.length > 0) {
-      for (const m of newModels) {
-        await redis.sadd('s4s:approved_models', m);
-        APPROVED_MODELS.add(m);
-      }
-      console.log(`🆕 Auto-approved ${newModels.length} new models from vault mappings: ${newModels.join(', ')}`);
-    }
-  } catch (e) {
-    console.error('❌ Auto-approve from vault mappings error:', e.message);
   }
 });
 
@@ -3592,6 +3557,111 @@ app.get('/skip-models', async (req, res) => {
   res.json({ skipped: [...SKIP_MODELS] });
 });
 
+// === Model Settings (dynamic, replaces hardcoded Sets) ===
+let MODEL_SETTINGS_CACHE = {}; // username -> settings object
+
+async function loadModelSettings() {
+  try {
+    // Scan all s4s:model-settings:* keys from Redis
+    let cursor = '0';
+    const settings = {};
+    do {
+      const result = await redis.scan(cursor, { match: 's4s:model-settings:*', count: 100 });
+      cursor = String(result[0]);
+      const keys = result[1] || [];
+      for (const key of keys) {
+        const username = key.replace('s4s:model-settings:', '');
+        const val = await redis.get(key);
+        if (val) settings[username] = val;
+      }
+    } while (cursor !== '0');
+    MODEL_SETTINGS_CACHE = settings;
+    console.log(`⚙️ Loaded model settings for ${Object.keys(settings).length} models`);
+  } catch (e) {
+    console.error('Failed to load model settings:', e.message);
+  }
+}
+
+function getModelSetting(username, key, defaultVal) {
+  const s = MODEL_SETTINGS_CACHE[username];
+  if (s && s[key] !== undefined) return s[key];
+  return defaultVal;
+}
+
+function isPromoterOnly(username) {
+  const s = MODEL_SETTINGS_CACHE[username];
+  if (s) return s.status === 'promoter_only';
+  return PROMOTER_ONLY.has(username); // fallback to hardcoded
+}
+
+function isNoPromote(username) {
+  const s = MODEL_SETTINGS_CACHE[username];
+  if (s) return s.canBePromoted === false;
+  return NO_PROMOTE.has(username); // fallback
+}
+
+function isArchiveInsteadOfDelete(username) {
+  const s = MODEL_SETTINGS_CACHE[username];
+  if (s) return s.archiveInsteadOfDelete === true;
+  return ARCHIVE_INSTEAD_OF_DELETE.has(username); // fallback
+}
+
+function getExcludeTargets(username) {
+  const s = MODEL_SETTINGS_CACHE[username];
+  if (s && s.excludeModels && s.excludeModels.length > 0) return new Set(s.excludeModels);
+  return EXCLUDE_TARGETS[username] || new Set(); // fallback
+}
+
+function getTagsPerDay(username) {
+  const s = MODEL_SETTINGS_CACHE[username];
+  if (s && s.ghostTagsPerDay !== undefined) return s.ghostTagsPerDay;
+  if (SPECIAL_MODELS[username]) return SPECIAL_MODELS[username].tagsPerDay;
+  if (PROMOTER_ONLY.has(username)) return 240;
+  return 57;
+}
+
+function isNoMassDm(username) {
+  const s = MODEL_SETTINGS_CACHE[username];
+  if (s) return s.massDm === false;
+  return SPECIAL_MODELS[username]?.noMassDm || false;
+}
+
+function isNoPinnedPost(username) {
+  const s = MODEL_SETTINGS_CACHE[username];
+  if (s) return s.pinnedPosts === false;
+  return SPECIAL_MODELS[username]?.noPinnedPost || false;
+}
+
+function isModelPaused(username) {
+  const s = MODEL_SETTINGS_CACHE[username];
+  if (s) return s.status === 'paused';
+  return SKIP_MODELS.has(username); // fallback
+}
+
+app.post('/model-settings', async (req, res) => {
+  const { username, settings } = req.body || {};
+  if (!username || !settings) return res.status(400).json({ error: 'username and settings required' });
+  try {
+    await redis.set(`s4s:model-settings:${username.toLowerCase()}`, JSON.stringify(settings));
+    MODEL_SETTINGS_CACHE[username.toLowerCase()] = settings;
+    console.log(`⚙️ Updated settings for ${username}:`, JSON.stringify(settings));
+    res.json({ ok: true });
+  } catch (e) {
+    console.error(`Failed to save model settings for ${username}:`, e.message);
+    res.status(500).json({ error: e.message });
+  }
+});
+
+app.get('/model-settings/:username', async (req, res) => {
+  const username = req.params.username.toLowerCase();
+  const settings = MODEL_SETTINGS_CACHE[username] || null;
+  res.json({ username, settings });
+});
+
+app.get('/model-settings', async (req, res) => {
+  res.json(MODEL_SETTINGS_CACHE);
+});
+
 // Approved models management — only approved models participate in S4S
 app.post('/approve-model', async (req, res) => {
   const { username } = req.body;
@@ -4246,76 +4316,6 @@ app.get('/', (req, res) => {
   });
 });
 
-// Sweep stale ghost tags across all models — catches orphans from crashes/restarts
-async function sweepStaleGhostTags() {
-  try {
-    const accountMap = await loadModelAccounts();
-    const allModels = Object.keys(accountMap);
-    let orphansFound = 0;
-    let orphansDeleted = 0;
-    
-    const SWEEP_BATCH = 15;
-    const tenMinAgo = Date.now() - 10 * 60 * 1000;
-    const sweepPairs = allModels.map(m => ({ model: m, acctId: accountMap[m] })).filter(p => p.acctId);
-    
-    for (let i = 0; i < sweepPairs.length; i += SWEEP_BATCH) {
-      const batch = sweepPairs.slice(i, i + SWEEP_BATCH);
-      const results = await Promise.allSettled(batch.map(async ({ model, acctId }) => {
-        // Skip accounts that are tripped
-        if (skipAccounts.has(acctId)) return { found: 0, deleted: 0 };
-        
-        const postsRes = await fetch(`${OF_API_BASE}/${acctId}/posts?limit=30`, {
-          headers: { 'Authorization': `Bearer ${OF_API_KEY}` }
-        });
-        if (!postsRes.ok) return { found: 0, deleted: 0 };
-        const postsData = await postsRes.json();
-        const posts = postsData?.data?.list || postsData?.data || postsData || [];
-        if (!Array.isArray(posts)) return { found: 0, deleted: 0 };
-        
-        let found = 0, deleted = 0;
-        for (const post of posts) {
-          const text = post.text || post.rawText || '';
-          const postId = post.id || post.postId;
-          const createdAt = new Date(post.postedAt || post.createdAt || post.created_at || 0).getTime();
-          const isPinned = post.isPinned || false;
-          // SFS ghost tags have @mentions wrapped in href tags, are not pinned, and older than 10 min
-          if (!isPinned && text.includes('@') && text.includes('href') && createdAt < tenMinAgo) {
-            found++;
-            console.log(`🧹 Stale SFS post found: ${postId} on @${model} — "${text.substring(0, 60)}..."`);
-            const ok = await deletePost(postId, acctId);
-            if (ok) deleted++;
-          }
-        }
-        return { found, deleted };
-      }));
-      
-      for (const r of results) {
-        if (r.status === 'fulfilled') {
-          orphansFound += r.value.found;
-          orphansDeleted += r.value.deleted;
-        }
-      }
-      if (i + SWEEP_BATCH < sweepPairs.length) await new Promise(r => setTimeout(r, 500));
-    }
-    
-    if (orphansFound > 0) {
-      console.log(`🧹 Stale sweep complete: found ${orphansFound}, deleted ${orphansDeleted}`);
-      await sendTelegramAlert(`🧹 Stale SFS sweep: deleted ${orphansDeleted}/${orphansFound} orphaned ghost tags across all models`);
-    } else {
-      console.log('🧹 Stale sweep complete: no orphans found');
-    }
-  } catch (e) {
-    console.error('Stale ghost tag sweep failed:', e.message);
-  }
-}
-
-// Run stale sweep every 30 minutes
-cron.schedule('15,45 * * * *', async () => {
-  if (!isRunning) return;
-  console.log('🧹 Scheduled stale ghost tag sweep...');
-  await sweepStaleGhostTags();
-});
-
 app.post('/start', async (req, res) => {
   if (isRunning) {
     return res.json({ status: 'already running' });
@@ -4341,7 +4341,57 @@ app.post('/start', async (req, res) => {
   
   // Orphan sweep: find and delete ghost tag posts older than 10 minutes
   console.log('🧹 Running orphan sweep...');
-  await sweepStaleGhostTags();
+  try {
+    const rawVaultMappingsForSweep = await loadVaultMappings();
+    const vaultMappingsForSweep = await filterToConnectedModels(rawVaultMappingsForSweep);
+    const sweepModels = Object.keys(vaultMappingsForSweep);
+    const sweepAccountMap = await loadModelAccounts();
+    let orphansFound = 0;
+    let orphansDeleted = 0;
+    
+    // Fix 3: Parallel orphan sweep — batch 15 models at a time
+    const SWEEP_BATCH = 15;
+    const tenMinAgo = Date.now() - 10 * 60 * 1000;
+    const sweepPairs = sweepModels.map(m => ({ model: m, acctId: sweepAccountMap[m] })).filter(p => p.acctId);
+    
+    for (let i = 0; i < sweepPairs.length; i += SWEEP_BATCH) {
+      const batch = sweepPairs.slice(i, i + SWEEP_BATCH);
+      const results = await Promise.allSettled(batch.map(async ({ model, acctId }) => {
+        const postsRes = await fetch(`${OF_API_BASE}/${acctId}/posts?limit=10`, {
+          headers: { 'Authorization': `Bearer ${OF_API_KEY}` }
+        });
+        if (!postsRes.ok) return { found: 0, deleted: 0 };
+        const postsData = await postsRes.json();
+        const posts = postsData?.data || postsData || [];
+        if (!Array.isArray(posts)) return { found: 0, deleted: 0 };
+        
+        let found = 0, deleted = 0;
+        for (const post of posts) {
+          const text = post.text || post.rawText || '';
+          const postId = post.id || post.postId;
+          const createdAt = new Date(post.postedAt || post.createdAt || post.created_at || 0).getTime();
+          if (text.includes('@') && sweepModels.some(m => m !== model && text.toLowerCase().includes(`@${m.toLowerCase()}`)) && createdAt < tenMinAgo) {
+            found++;
+            console.log(`🧹 Orphan found: post ${postId} on ${model} — "${text.substring(0, 50)}..."`);
+            const ok = await deletePost(postId, acctId);
+            if (ok) deleted++;
+          }
+        }
+        return { found, deleted };
+      }));
+      
+      for (const r of results) {
+        if (r.status === 'fulfilled') {
+          orphansFound += r.value.found;
+          orphansDeleted += r.value.deleted;
+        }
+      }
+      if (i + SWEEP_BATCH < sweepPairs.length) await new Promise(r => setTimeout(r, 500));
+    }
+    console.log(`🧹 Orphan sweep complete: found ${orphansFound}, deleted ${orphansDeleted}`);
+  } catch (sweepErr) {
+    console.error('Orphan sweep failed:', sweepErr.message);
+  }
   
   // Generate initial schedule — filtered to OF API connected accounts only
   const rawVaultMappings = await loadVaultMappings();
@@ -4380,12 +4430,6 @@ app.post('/circuit-breaker/reset/:accountId', (req, res) => {
 });
 
 // Purge pending deletes for a specific model (promoter)
-app.post('/sweep-stale', async (req, res) => {
-  console.log('🧹 Manual stale sweep triggered');
-  await sweepStaleGhostTags();
-  res.json({ ok: true });
-});
-
 app.post('/purge-pending/:username', async (req, res) => {
   const username = req.params.username.toLowerCase();
   const pending = await getPendingDeletes();
@@ -4813,17 +4857,23 @@ app.get('/models-status', async (req, res) => {
       const flags = [];
       const exclusions = [];
 
-      if (SKIP_MODELS.has(model)) flags.push('skipped');
-      if (PROMOTER_ONLY.has(model)) flags.push('promoter_only');
-      if (NO_PROMOTE.has(model)) flags.push('no_promote');
-      if (ARCHIVE_INSTEAD_OF_DELETE.has(model)) flags.push('archive_delete');
-      if (SPECIAL_MODELS[model]) flags.push('special');
+      if (isModelPaused(model) || SKIP_MODELS.has(model)) flags.push('skipped');
+      if (isPromoterOnly(model)) flags.push('promoter_only');
+      if (isNoPromote(model)) flags.push('no_promote');
+      if (isArchiveInsteadOfDelete(model)) flags.push('archive_delete');
+      
+      const tagsPerDay = getTagsPerDay(model);
+      const noMassDm = isNoMassDm(model);
+      const noPinned = isNoPinnedPost(model);
+      const isSpecial = tagsPerDay !== 57 || noMassDm || noPinned;
+      if (isSpecial) flags.push('special');
 
-      if (EXCLUDE_TARGETS[model]) {
-        exclusions.push(...EXCLUDE_TARGETS[model]);
+      const excludeSet = getExcludeTargets(model);
+      if (excludeSet.size > 0) {
+        exclusions.push(...excludeSet);
       }
 
-      const specialLabel = SPECIAL_MODELS[model]?.label || null;
+      const specialLabel = isSpecial ? `${tagsPerDay} tags/day${noMassDm ? ' · No DM' : ''}${noPinned ? ' · No Pinned' : ''}` : null;
 
       if (flags.length > 0 || exclusions.length > 0 || specialLabel) {
         models[model] = { flags };
@@ -5988,6 +6038,7 @@ app.listen(PORT, async () => {
   await loadSkipModels();
   await loadSkipAccountsFromRedis();
   await loadApprovedModels();
+  await loadModelSettings();
 
   // Load SFS exclude lists from Redis (seeds if needed)
   await loadSfsExcludeLists();
