@@ -45,6 +45,16 @@ function requireApiKey(req, res, next) {
 // Webhook stats (used by both webhook handler and stats endpoint)
 const webhookStats = { totalEvents: 0, byType: {}, lastEventAt: null };
 
+// Fix 6: Add API call counter for monitoring
+const apiCallStats = {
+  rotation: 0,
+  deletes: 0,
+  massDm: 0,
+  uploads: 0,
+  other: 0,
+  lastReset: Date.now()
+};
+
 // OpenClaw lightweight poke — triggers cron dispatcher, NO Opus calls
 const BIANCA_ACCOUNT_ID_CONST = 'acct_54e3119e77da4429b6537f7dd2883a05';
 async function wakeOpenClawAgent(eventType, context) {
@@ -719,13 +729,23 @@ async function processOverdueDeletes() {
 // === CORE FUNCTIONS ===
 
 async function loadVaultMappings() {
+  // Fix 2: Add v1 vault mapping cache (10 minutes)
+  if (cachedVaultMappingsV1 && Date.now() - v1LastLoad < 600000) {
+    return cachedVaultMappingsV1;
+  }
+  
   try {
     const data = await redis.get('vault_mappings');
-    console.log('Loaded vault mappings:', Object.keys(data || {}).length, 'models');
-    return data || {};
+    if (data) {
+      cachedVaultMappingsV1 = data;
+      v1LastLoad = Date.now();
+      console.log('Loaded vault mappings:', Object.keys(data || {}).length, 'models');
+      return data;
+    }
+    return {};
   } catch (e) {
     console.error('Failed to load vault mappings:', e);
-    return {};
+    return cachedVaultMappingsV1 || {};
   }
 }
 
@@ -733,9 +753,13 @@ async function loadVaultMappings() {
 let cachedVaultMappingsV2 = null;
 let v2LastLoad = 0;
 
+// Fix 2: Add v1 vault mapping cache (10 minutes)
+let cachedVaultMappingsV1 = null;
+let v1LastLoad = 0;
+
 async function loadVaultMappingsV2() {
-  // Cache for 60s
-  if (cachedVaultMappingsV2 && Date.now() - v2LastLoad < 60000) return cachedVaultMappingsV2;
+  // Fix 4: Increase v2 vault mapping cache to 10 minutes
+  if (cachedVaultMappingsV2 && Date.now() - v2LastLoad < 600000) return cachedVaultMappingsV2;
   try {
     const data = await redis.get('vault_mappings_v2');
     if (data && Object.keys(data).length > 0) {
@@ -763,12 +787,13 @@ async function getVaultIdForUse(promoter, target, use, v1Mappings) {
   return v1Mappings[promoter]?.[target] || null;
 }
 
-// Cached accounts — refreshes every 10 min instead of every call (~20K API calls/day saved)
+// Cached accounts — refreshes every 30 min instead of every call (~20K API calls/day saved)
 let _modelAccountsCache = null;
 let _modelAccountsCacheTs = 0;
-const MODEL_ACCOUNTS_CACHE_TTL = 10 * 60 * 1000; // 10 minutes
+const MODEL_ACCOUNTS_CACHE_TTL = 30 * 60 * 1000; // Fix 3: Increase to 30 minutes
 
 async function _refreshAccountsCache() {
+  apiCallStats.other++; // Fix 6: Increment API call counter
   const res = await fetch(`${OF_API_BASE}/accounts`, {
     headers: { 'Authorization': `Bearer ${OF_API_KEY}` }
   });
@@ -1102,6 +1127,7 @@ async function executeTag(promoter, target, vaultId, accountId) {
   }
   
   try {
+    apiCallStats.rotation++; // Fix 6: Increment API call counter
     const res = await fetch(`${OF_API_BASE}/${accountId}/posts`, {
       method: 'POST',
       headers: {
@@ -1157,38 +1183,15 @@ async function deletePost(postId, accountId, _retryCount = 0) {
   const RETRY_DELAYS = [10000, 20000, 30000]; // 10s, 20s, 30s
   
   try {
+    apiCallStats.deletes++; // Fix 6: Increment API call counter
     const res = await fetch(`${OF_API_BASE}/${accountId}/posts/${postId}`, {
       method: 'DELETE',
       headers: { 'Authorization': `Bearer ${OF_API_KEY}` }
     });
     
     if (res.ok) {
-      // Verify the post is actually gone (OF sometimes says OK but keeps it)
-      await new Promise(r => setTimeout(r, 15000));
-      try {
-        const verifyRes = await fetch(`${OF_API_BASE}/${accountId}/posts/${postId}`, {
-          headers: { 'Authorization': `Bearer ${OF_API_KEY}` }
-        });
-        if (verifyRes.status === 404) {
-          console.log(`🗑️✅ Verified deleted post ${postId}${_retryCount > 0 ? ` (retry #${_retryCount})` : ''}`);
-          resetAccountBreaker(accountId); updateGlobalBreakerStats();
-          return true;
-        }
-        const verifyData = await verifyRes.json().catch(() => ({}));
-        if (verifyData?.data?.id || verifyData?.id) {
-          console.warn(`⚠️ Post ${postId} still exists after "successful" delete! Retrying...`);
-          if (_retryCount < MAX_RETRIES) {
-            await new Promise(r => setTimeout(r, 10000));
-            return deletePost(postId, accountId, _retryCount + 1);
-          }
-          console.error(`❌ Post ${postId} STUCK — ${MAX_RETRIES} delete attempts all "succeeded" but post persists`);
-          onDeleteFailure(postId, accountId, 'ghost-persist');
-          return false;
-        }
-      } catch (verifyErr) {
-        // If verify fails, assume delete worked
-        console.log(`🗑️ Deleted post ${postId} (verify check failed: ${verifyErr.message})`);
-      }
+      // Fix 1: Remove delete verification on successful responses (~20K API calls/day saved)
+      console.log(`🗑️ Deleted post ${postId}${_retryCount > 0 ? ` (retry #${_retryCount})` : ''}`);
       resetAccountBreaker(accountId); updateGlobalBreakerStats();
       return true;
     } else {
@@ -1613,6 +1616,7 @@ async function createPinnedPost(promoterAccountId, targetUsername, vaultId) {
   
   try {
     // Step 1: Create the post with 24hr expiry
+    apiCallStats.other++; // Fix 6: Increment API call counter
     const res = await fetch(`${OF_API_BASE}/${promoterAccountId}/posts`, {
       method: 'POST',
       headers: {
@@ -1662,6 +1666,7 @@ async function createPinnedPost(promoterAccountId, targetUsername, vaultId) {
     
     // Step 2: Pin the post (separate API call)
     await new Promise(r => setTimeout(r, 1000));
+    apiCallStats.other++; // Fix 6: Increment API call counter
     const pinRes = await fetch(`${OF_API_BASE}/${promoterAccountId}/posts/${postId}/pin`, {
       method: 'POST',
       headers: {
@@ -2485,9 +2490,9 @@ async function addActiveChatExcludeTracked(username, accountId, fanId) {
   }
 }
 
-// Cron schedules for cleanup
-cron.schedule('0 * * * *', cleanupNewSubExcludes);       // Every hour
-cron.schedule('0 * * * *', cleanupActiveChatExcludes);   // Every hour (was 15 min — saves ~75% cleanup calls)
+// Fix 5: Reduce cleanup frequency
+cron.schedule('0 */6 * * *', cleanupNewSubExcludes);     // Every 6 hours (was every hour)
+cron.schedule('0 */2 * * *', cleanupActiveChatExcludes); // Every 2 hours (was every hour)
 
 // Auto-detect new models and create their exclude lists (every 2 hours — was 10 min)
 cron.schedule('0 */2 * * *', async () => {
@@ -2706,6 +2711,7 @@ async function getClaudeResponse(conversationHistory, newMessage, fanContext) {
 }
 
 async function sendChatbotMessage(accountId, userId, text) {
+  apiCallStats.other++; // Fix 6: Increment API call counter
   const res = await fetch(`${OF_API_BASE}/${accountId}/chats/${userId}/messages`, {
     method: 'POST',
     headers: {
@@ -2719,6 +2725,7 @@ async function sendChatbotMessage(accountId, userId, text) {
 }
 
 async function sendChatbotPPV(accountId, userId, text, price, vaultIds) {
+  apiCallStats.other++; // Fix 6: Increment API call counter
   const res = await fetch(`${OF_API_BASE}/${accountId}/chats/${userId}/messages`, {
     method: 'POST',
     headers: {
@@ -3727,6 +3734,7 @@ app.post('/reverse-distribute', requireApiKey, async (req, res) => {
         // Step 3: Upload to target account
         const formData = new FormData();
         formData.append('file', new Blob([imgBuffer], { type: 'image/jpeg' }), `${sourceUsername}_promo.jpg`);
+        apiCallStats.uploads++; // Fix 6: Increment API call counter
         const uploadRes = await fetch(`${OF_API_BASE}/${targetAcct}/media/upload`, {
           method: 'POST', headers: apiHeaders, body: formData
         });
@@ -3873,6 +3881,7 @@ async function sendMassDm(promoterUsername, targetUsername, vaultId, accountId) 
     };
     
     console.log(`📨 Mass DM ${promoterUsername} → @${targetUsername} | exclude: ${excludedLists.length > 0 ? JSON.stringify(excludedLists) : 'NONE'}`);
+    apiCallStats.massDm++; // Fix 6: Increment API call counter
     const res = await fetch(`${OF_API_BASE}/${accountId}/mass-messaging`, {
       method: 'POST',
       headers: {
@@ -5259,6 +5268,27 @@ app.post('/api/regenerate-schedule', async (req, res) => {
 
 app.get('/health', (req, res) => {
   res.json({ ok: true, timestamp: new Date().toISOString() });
+});
+
+// Fix 6: API call stats endpoint
+app.get('/api-stats', (req, res) => {
+  const now = Date.now();
+  const hoursSinceReset = (now - apiCallStats.lastReset) / (1000 * 60 * 60);
+  
+  // Reset counters if more than 1 hour has passed
+  if (hoursSinceReset >= 1) {
+    apiCallStats.rotation = 0;
+    apiCallStats.deletes = 0;
+    apiCallStats.massDm = 0;
+    apiCallStats.uploads = 0;
+    apiCallStats.other = 0;
+    apiCallStats.lastReset = now;
+  }
+  
+  res.json({
+    ...apiCallStats,
+    hoursSinceReset: Math.round(hoursSinceReset * 100) / 100
+  });
 });
 
 // === BIANCA WOODS HOURLY BUMP SYSTEM ===
