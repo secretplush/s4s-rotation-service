@@ -3799,6 +3799,9 @@ async function _processMassDmScheduleInner() {
     const accountId = accountMap[model];
     if (!accountId) continue;
     
+    // Skip tripped/401'd accounts entirely — don't even attempt
+    if (skipAccounts.has(accountId) || isAccountTripped(accountId)) continue;
+    
     for (const entry of entries) {
       if (entry.executed || entry.failed) continue;
       
@@ -4099,13 +4102,16 @@ app.post('/mass-dm/run', async (req, res) => {
   
   // Find next pending DM (even if not yet due, for testing)
   for (const [model, entries] of Object.entries(data.schedule)) {
+    const accountId = accountMap[model];
+    if (!accountId) continue;
+    if (skipAccounts.has(accountId) || isAccountTripped(accountId)) continue;
+    
     for (const entry of entries) {
       if (entry.executed || entry.failed) continue;
       
-      const accountId = accountMap[model];
       const vaultId = entry.vaultId || vaultMappings[model]?.[entry.target];
       
-      if (!accountId || !vaultId) continue;
+      if (!vaultId) continue;
       
       const success = await sendMassDm(model, entry.target, vaultId, accountId);
       entry.executed = true;
