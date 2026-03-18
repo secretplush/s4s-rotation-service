@@ -3630,6 +3630,182 @@ app.post('/seed-approved-from-vaults', async (req, res) => {
   }
 });
 
+// === REVERSE DISTRIBUTION ===
+// Upload existing models' promo photos into a new model's vault
+// Uses v2 vault IDs from a donor model, downloads CDN images, re-uploads to target
+app.post('/reverse-distribute', async (req, res) => {
+  const { targetUsername, donorUsername } = req.body;
+  if (!targetUsername || !donorUsername) {
+    return res.status(400).json({ error: 'targetUsername and donorUsername required' });
+  }
+
+  const accountMap = await loadModelAccounts();
+  const targetAcct = accountMap[targetUsername];
+  const donorAcct = accountMap[donorUsername];
+  if (!targetAcct) return res.status(400).json({ error: `Unknown target: ${targetUsername}` });
+  if (!donorAcct) return res.status(400).json({ error: `Unknown donor: ${donorUsername}` });
+
+  // Get v2 mappings for the donor
+  const v2 = await loadVaultMappingsV2() || {};
+  const donorV2 = v2[donorUsername] || {};
+
+  // Find which models the target is missing
+  const v1 = await loadVaultMappings();
+  const existingTargets = new Set(Object.keys(v1[targetUsername] || {}));
+  
+  // Only distribute approved models
+  const modelsToDistribute = [...APPROVED_MODELS].filter(m => 
+    m !== targetUsername && !existingTargets.has(m)
+  );
+
+  if (modelsToDistribute.length === 0) {
+    return res.json({ success: true, message: 'No missing models', distributed: 0 });
+  }
+
+  console.log(`🔄 Reverse distribute: ${modelsToDistribute.length} models → ${targetUsername} via donor ${donorUsername}`);
+
+  // Respond immediately, process in background
+  res.json({ 
+    success: true, 
+    message: `Started reverse distribution of ${modelsToDistribute.length} models to ${targetUsername}`,
+    modelsToDistribute: modelsToDistribute.length
+  });
+
+  // Background processing
+  const apiHeaders = { 'Authorization': `Bearer ${OF_API_KEY}` };
+  const results = [];
+  const BATCH_SIZE = 5;
+
+  for (let i = 0; i < modelsToDistribute.length; i += BATCH_SIZE) {
+    const batch = modelsToDistribute.slice(i, i + BATCH_SIZE);
+    
+    const batchResults = await Promise.all(batch.map(async (sourceUsername) => {
+      // Get donor's v2 vault ID for this source model
+      const mapping = donorV2[sourceUsername];
+      const donorVaultId = mapping?.ghost?.[0] || mapping?.pinned?.[0] || mapping?.massDm?.[0];
+      if (!donorVaultId) {
+        return { username: sourceUsername, success: false, error: 'No v2 vault ID in donor' };
+      }
+
+      try {
+        // Step 1: Create temp post on donor to get CDN URL
+        const postRes = await fetch(`${OF_API_BASE}/${donorAcct}/posts`, {
+          method: 'POST',
+          headers: { ...apiHeaders, 'Content-Type': 'application/json' },
+          body: JSON.stringify({ text: 'temp', mediaFiles: [String(donorVaultId)] })
+        });
+        if (!postRes.ok) {
+          return { username: sourceUsername, success: false, error: `Donor post failed: ${postRes.status}` };
+        }
+        const postJson = await postRes.json();
+        const postData = postJson.data || postJson;
+        const postId = postData.id;
+        const cdnUrl = postData.media?.[0]?.files?.full?.url;
+
+        if (!cdnUrl) {
+          if (postId) fetch(`${OF_API_BASE}/${donorAcct}/posts/${postId}`, { method: 'DELETE', headers: apiHeaders });
+          return { username: sourceUsername, success: false, error: 'No CDN URL' };
+        }
+
+        // Step 2: Download image from CDN
+        const imgRes = await fetch(cdnUrl);
+        // Delete donor post (fire and forget)
+        if (postId) fetch(`${OF_API_BASE}/${donorAcct}/posts/${postId}`, { method: 'DELETE', headers: apiHeaders });
+
+        if (!imgRes.ok) return { username: sourceUsername, success: false, error: `CDN ${imgRes.status}` };
+        const imgBuffer = Buffer.from(await imgRes.arrayBuffer());
+        if (imgBuffer.length < 1000) return { username: sourceUsername, success: false, error: 'Image too small' };
+
+        // Step 3: Upload to target account
+        const formData = new FormData();
+        formData.append('file', new Blob([imgBuffer], { type: 'image/jpeg' }), `${sourceUsername}_promo.jpg`);
+        const uploadRes = await fetch(`${OF_API_BASE}/${targetAcct}/media/upload`, {
+          method: 'POST', headers: apiHeaders, body: formData
+        });
+        if (!uploadRes.ok) return { username: sourceUsername, success: false, error: `Upload failed: ${uploadRes.status}` };
+        const uploadData = await uploadRes.json();
+        const mediaId = uploadData.prefixed_id || uploadData.id;
+        if (!mediaId) return { username: sourceUsername, success: false, error: 'No media ID' };
+
+        // Step 4: Create post to mint vault_id
+        await new Promise(r => setTimeout(r, 500));
+        const mintRes = await fetch(`${OF_API_BASE}/${targetAcct}/posts`, {
+          method: 'POST',
+          headers: { ...apiHeaders, 'Content-Type': 'application/json' },
+          body: JSON.stringify({ text: `@${sourceUsername}`, mediaFiles: [mediaId] })
+        });
+        if (!mintRes.ok) return { username: sourceUsername, success: false, error: `Mint post failed: ${mintRes.status}` };
+        const mintJson = await mintRes.json();
+        const mintData = mintJson.data || mintJson;
+        const mintPostId = mintData.id;
+        const newVaultId = mintData.media?.[0]?.id?.toString();
+
+        // Delete mint post
+        if (mintPostId) {
+          await new Promise(r => setTimeout(r, 500));
+          fetch(`${OF_API_BASE}/${targetAcct}/posts/${mintPostId}`, { method: 'DELETE', headers: apiHeaders });
+        }
+
+        if (!newVaultId) return { username: sourceUsername, success: false, error: 'No vault_id from mint' };
+
+        console.log(`  ✅ ${sourceUsername} → ${targetUsername} vault_id: ${newVaultId}`);
+        return { username: sourceUsername, success: true, vaultId: newVaultId };
+      } catch (e) {
+        return { username: sourceUsername, success: false, error: e.message };
+      }
+    }));
+
+    results.push(...batchResults);
+    if (i + BATCH_SIZE < modelsToDistribute.length) await new Promise(r => setTimeout(r, 1000));
+  }
+
+  // Save successful vault mappings to Redis
+  const successful = results.filter(r => r.success);
+  if (successful.length > 0) {
+    try {
+      const currentV1 = await loadVaultMappings();
+      if (!currentV1[targetUsername]) currentV1[targetUsername] = {};
+      for (const r of successful) {
+        currentV1[targetUsername][r.username] = r.vaultId;
+      }
+      await redis.set('vault_mappings', JSON.stringify(currentV1));
+
+      const currentV2 = (await redis.get('vault_mappings_v2')) || {};
+      if (typeof currentV2 === 'string') {
+        var parsedV2 = JSON.parse(currentV2);
+      } else {
+        var parsedV2 = currentV2;
+      }
+      if (!parsedV2[targetUsername]) parsedV2[targetUsername] = {};
+      for (const r of successful) {
+        parsedV2[targetUsername][r.username] = { ghost: [r.vaultId], pinned: [r.vaultId], massDm: [r.vaultId] };
+      }
+      await redis.set('vault_mappings_v2', JSON.stringify(parsedV2));
+      
+      // Refresh in-memory cache
+      cachedVaultMappingsV2 = parsedV2;
+      v2LastLoad = Date.now();
+    } catch (e) {
+      console.error('Failed to save reverse distribution vault mappings:', e);
+    }
+  }
+
+  // Auto-approve the target model
+  if (!APPROVED_MODELS.has(targetUsername)) {
+    await redis.sadd('s4s:approved_models', targetUsername);
+    APPROVED_MODELS.add(targetUsername);
+    console.log(`✅ Auto-approved ${targetUsername}`);
+  }
+
+  const failed = results.filter(r => !r.success);
+  console.log(`🔄 Reverse distribute done: ${successful.length} success, ${failed.length} failed for ${targetUsername}`);
+  
+  // Log failures for debugging
+  if (failed.length > 0) {
+    console.log(`  Failed: ${failed.map(f => `${f.username}(${f.error})`).join(', ')}`);
+  }
+});
+
 async function getBiancaActiveChatters() {
   // Fetch active chatter IDs from bianca daemon via tunnel
   try {
