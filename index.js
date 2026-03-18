@@ -1158,7 +1158,7 @@ async function deletePost(postId, accountId, _retryCount = 0) {
         });
         if (verifyRes.status === 404) {
           console.log(`🗑️✅ Verified deleted post ${postId}${_retryCount > 0 ? ` (retry #${_retryCount})` : ''}`);
-          resetAccountBreaker(accountId); skipAccounts.delete(accountId); updateGlobalBreakerStats();
+          resetAccountBreaker(accountId); updateGlobalBreakerStats();
           return true;
         }
         const verifyData = await verifyRes.json().catch(() => ({}));
@@ -1176,7 +1176,7 @@ async function deletePost(postId, accountId, _retryCount = 0) {
         // If verify fails, assume delete worked
         console.log(`🗑️ Deleted post ${postId} (verify check failed: ${verifyErr.message})`);
       }
-      resetAccountBreaker(accountId); skipAccounts.delete(accountId); updateGlobalBreakerStats();
+      resetAccountBreaker(accountId); updateGlobalBreakerStats();
       return true;
     } else {
       const err = await res.text();
@@ -1184,7 +1184,7 @@ async function deletePost(postId, accountId, _retryCount = 0) {
       if (res.status === 404 || err.includes('not found') || err.includes('already deleted') 
           || err.includes('Post not found')) {
         console.log(`🗑️ Post ${postId} already deleted (${res.status}), cleaning up`);
-        resetAccountBreaker(accountId); skipAccounts.delete(accountId); updateGlobalBreakerStats();
+        resetAccountBreaker(accountId); updateGlobalBreakerStats();
         return true;
       }
       
@@ -1227,7 +1227,7 @@ async function deletePost(postId, accountId, _retryCount = 0) {
           const checkData = await checkRes.json();
           if (!checkData?.data?.id) {
             console.log(`🗑️ Post ${postId} confirmed gone after 500, cleaning up`);
-            resetAccountBreaker(accountId); skipAccounts.delete(accountId); updateGlobalBreakerStats();
+            resetAccountBreaker(accountId); updateGlobalBreakerStats();
             return true;
           }
           console.error(`❌ Post ${postId} still exists after delete 500 — real failure`);
@@ -1318,7 +1318,7 @@ async function runRotationCycle() {
           });
           success = archiveRes.ok || archiveRes.status === 404 || archiveRes.status === 400; // 400 = already archived
           console.log(`📦 Archived (paid page) post ${del.postId} for ${promoter}: ${archiveRes.status}`);
-          if (success) { resetAccountBreaker(del.accountId); skipAccounts.delete(del.accountId); updateGlobalBreakerStats(); }
+          if (success) { resetAccountBreaker(del.accountId); updateGlobalBreakerStats(); }
         } catch (e) {
           console.error(`Failed to archive ${del.postId}:`, e.message);
           success = false;
