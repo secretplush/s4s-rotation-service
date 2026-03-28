@@ -55,6 +55,15 @@ const apiCallStats = {
   lastReset: Date.now()
 };
 
+// Credit budget tracking
+const OFAPI_MONTHLY_LIMIT = 100000; // 100K credits per month
+let creditBudgetTracking = {
+  dailyUsage: {}, // date -> credits used that day
+  lastAlertDate: null, // when we last sent a budget alert
+  monthlyProjection: 0,
+  lastCalculated: Date.now()
+};
+
 // OpenClaw lightweight poke — triggers cron dispatcher, NO Opus calls
 const BIANCA_ACCOUNT_ID_CONST = 'acct_54e3119e77da4429b6537f7dd2883a05';
 async function wakeOpenClawAgent(eventType, context) {
@@ -486,6 +495,31 @@ let rotationState = {
   }
 };
 
+// Smart rotation weighting - track conversion rates
+let conversionData = {
+  // promoter -> { target -> { follows: 0, subs: 0, tags: 0, conversionRate: 0.0 } }
+  promoters: {},
+  lastUpdated: Date.now(),
+  totalTags: 0,
+  totalConversions: 0
+};
+
+// Dead model detection - track daily subscriber counts
+let deadModelDetection = {
+  dailySnapshots: {}, // date -> { username -> subCount }
+  flaggedModels: new Set(), // models with 0 growth after 2 weeks
+  lastSnapshotDate: null,
+  trackingStarted: Date.now()
+};
+
+// Promo photo quality tracking
+let promoPhotoQuality = {
+  flaggedPhotos: new Map(), // vaultId -> { username, issue, resolution, fileSize, flaggedAt }
+  checkedPhotos: new Set(), // vaultIds that have been checked
+  totalChecked: 0,
+  totalFlagged: 0
+};
+
 // Delete circuit breaker — per-account tracking (no longer stops entire rotation)
 const DELETE_CIRCUIT_BREAKER = {
   consecutiveFailures: 0,  // aggregate — for backwards compat
@@ -494,8 +528,245 @@ const DELETE_CIRCUIT_BREAKER = {
   trippedAt: null,
 };
 
-// Per-account circuit breaker: accountId → { consecutiveFailures, lastFailure, trippedAt, skippedSince }
+// Per-account circuit breaker: accountId → { consecutiveFailures, lastFailure, trippedAt, skippedSince, lastAlert }
 const perAccountCircuitBreaker = {};
+
+// Track when we last sent an alert for each model (24h cooldown)
+let reconnectAlerts = {}; // accountId -> lastAlertTimestamp
+
+// Credit budget functions
+function trackCreditsUsed(credits) {
+  const today = new Date().toISOString().slice(0, 10); // YYYY-MM-DD
+  if (!creditBudgetTracking.dailyUsage[today]) {
+    creditBudgetTracking.dailyUsage[today] = 0;
+  }
+  creditBudgetTracking.dailyUsage[today] += credits;
+  
+  // Keep only last 35 days
+  const dates = Object.keys(creditBudgetTracking.dailyUsage).sort();
+  if (dates.length > 35) {
+    const toDelete = dates.slice(0, dates.length - 35);
+    for (const date of toDelete) {
+      delete creditBudgetTracking.dailyUsage[date];
+    }
+  }
+}
+
+function calculateMonthlyProjection() {
+  const now = new Date();
+  const currentMonth = now.toISOString().slice(0, 7); // YYYY-MM
+  const daysInMonth = new Date(now.getFullYear(), now.getMonth() + 1, 0).getDate();
+  const dayOfMonth = now.getDate();
+  
+  // Calculate credits used so far this month
+  let monthlyUsage = 0;
+  for (const [date, usage] of Object.entries(creditBudgetTracking.dailyUsage)) {
+    if (date.startsWith(currentMonth)) {
+      monthlyUsage += usage;
+    }
+  }
+  
+  // Project to end of month based on current daily average
+  const avgDailyUsage = dayOfMonth > 0 ? monthlyUsage / dayOfMonth : 0;
+  const projectedMonthly = avgDailyUsage * daysInMonth;
+  
+  creditBudgetTracking.monthlyProjection = Math.round(projectedMonthly);
+  creditBudgetTracking.lastCalculated = Date.now();
+  
+  return projectedMonthly;
+}
+
+async function checkCreditBudgetAlert() {
+  try {
+    const projection = calculateMonthlyProjection();
+    const today = new Date().toISOString().slice(0, 10);
+    
+    // Don't spam - max 1 alert per day
+    if (creditBudgetTracking.lastAlertDate === today) {
+      return;
+    }
+    
+    // Alert if projection exceeds 90% of monthly limit
+    const warningThreshold = OFAPI_MONTHLY_LIMIT * 0.9; // 90K credits
+    
+    if (projection > warningThreshold) {
+      const percentOver = Math.round((projection / OFAPI_MONTHLY_LIMIT) * 100);
+      const currentMonth = new Date().toISOString().slice(0, 7);
+      
+      let monthlyUsage = 0;
+      for (const [date, usage] of Object.entries(creditBudgetTracking.dailyUsage)) {
+        if (date.startsWith(currentMonth)) {
+          monthlyUsage += usage;
+        }
+      }
+      
+      const dailyAvg = monthlyUsage / new Date().getDate();
+      
+      const alertMsg = `💳 OFAPI Credit Budget Alert\n\n` +
+        `Monthly projection: ${projection.toLocaleString()} credits (${percentOver}%)\n` +
+        `Monthly limit: ${OFAPI_MONTHLY_LIMIT.toLocaleString()} credits\n` +
+        `Used so far: ${monthlyUsage.toLocaleString()} credits\n` +
+        `Daily average: ${Math.round(dailyAvg).toLocaleString()} credits\n\n` +
+        `⚠️ Current usage rate will exceed monthly budget by ${(projection - OFAPI_MONTHLY_LIMIT).toLocaleString()} credits.\n\n` +
+        `Consider reducing API calls or upgrading plan.`;
+
+      const response = await fetch(`https://api.telegram.org/bot${process.env.TELEGRAM_BOT_TOKEN}/sendMessage`, {
+        method: 'POST',
+        headers: { 'Content-Type': 'application/json' },
+        body: JSON.stringify({
+          chat_id: process.env.TELEGRAM_ALERT_CHAT_ID || '5505937268',
+          text: alertMsg
+        })
+      });
+
+      if (response.ok) {
+        creditBudgetTracking.lastAlertDate = today;
+        console.log(`💳 Credit budget alert sent: ${projection.toLocaleString()} projected (${percentOver}%)`);
+      }
+    }
+    
+    // Persist updated tracking data
+    await redis.set('s4s:credit-budget-tracking', creditBudgetTracking);
+    
+  } catch (e) {
+    console.error('Error checking credit budget alert:', e.message);
+  }
+}
+
+// Load credit budget tracking data from Redis
+async function loadCreditBudgetData() {
+  try {
+    const data = await redis.get('s4s:credit-budget-tracking');
+    if (data) {
+      creditBudgetTracking = { ...creditBudgetTracking, ...data };
+      console.log(`💳 Loaded credit budget tracking: ${Object.keys(creditBudgetTracking.dailyUsage).length} days of data`);
+    }
+  } catch (e) {
+    console.error('Failed to load credit budget tracking:', e.message);
+  }
+}
+
+// Promo photo quality check functions
+async function checkPromoPhotoQuality(vaultId, username, accountId) {
+  try {
+    // Skip if already checked
+    if (promoPhotoQuality.checkedPhotos.has(vaultId)) {
+      return null;
+    }
+    
+    console.log(`📷 Checking promo photo quality for @${username} (vault ${vaultId})`);
+    
+    // Get photo metadata via temporary post
+    const tempRes = await fetch(`${OF_API_BASE}/${accountId}/posts`, {
+      method: 'POST',
+      headers: { 'Authorization': `Bearer ${OF_API_KEY}`, 'Content-Type': 'application/json' },
+      body: JSON.stringify({ text: 'temp quality check', mediaFiles: [vaultId] })
+    });
+    
+    if (!tempRes.ok) {
+      console.log(`📷 Failed to create temp post for quality check: ${tempRes.status}`);
+      return null;
+    }
+    
+    const tempData = await tempRes.json();
+    const postId = tempData.id || tempData.data?.id;
+    const media = tempData.media?.[0] || tempData.data?.media?.[0];
+    
+    // Delete temp post immediately
+    if (postId) {
+      setTimeout(() => {
+        fetch(`${OF_API_BASE}/${accountId}/posts/${postId}`, {
+          method: 'DELETE',
+          headers: { 'Authorization': `Bearer ${OF_API_KEY}` }
+        }).catch(() => {});
+      }, 1000);
+    }
+    
+    if (!media) {
+      console.log(`📷 No media data found in temp post`);
+      return null;
+    }
+    
+    // Extract image metadata
+    const resolution = `${media.width || 0}x${media.height || 0}`;
+    const fileSize = media.size || 0;
+    const width = media.width || 0;
+    const height = media.height || 0;
+    
+    // Quality checks
+    const issues = [];
+    
+    // Minimum resolution check (400x400)
+    if (width < 400 || height < 400) {
+      issues.push('Low resolution (minimum 400x400 required)');
+    }
+    
+    // Very small file size might indicate low quality
+    if (fileSize > 0 && fileSize < 50000) { // Less than 50KB
+      issues.push('Very small file size (possible low quality)');
+    }
+    
+    // Aspect ratio checks (avoid very stretched images)
+    if (width > 0 && height > 0) {
+      const aspectRatio = width / height;
+      if (aspectRatio > 3 || aspectRatio < 0.33) {
+        issues.push('Unusual aspect ratio (too stretched)');
+      }
+    }
+    
+    promoPhotoQuality.checkedPhotos.add(vaultId);
+    promoPhotoQuality.totalChecked++;
+    
+    if (issues.length > 0) {
+      const flagData = {
+        username,
+        vaultId,
+        issues,
+        resolution,
+        fileSize,
+        flaggedAt: Date.now()
+      };
+      
+      promoPhotoQuality.flaggedPhotos.set(vaultId, flagData);
+      promoPhotoQuality.totalFlagged++;
+      
+      console.log(`📷 ⚠️ Flagged photo for @${username}: ${issues.join(', ')} (${resolution}, ${fileSize} bytes)`);
+      
+      // Persist to Redis
+      await redis.set('s4s:promo-photo-quality', {
+        flaggedPhotos: Object.fromEntries(promoPhotoQuality.flaggedPhotos),
+        checkedPhotos: [...promoPhotoQuality.checkedPhotos],
+        totalChecked: promoPhotoQuality.totalChecked,
+        totalFlagged: promoPhotoQuality.totalFlagged
+      });
+      
+      return flagData;
+    } else {
+      console.log(`📷 ✅ Photo quality OK for @${username} (${resolution}, ${fileSize} bytes)`);
+      return null;
+    }
+    
+  } catch (e) {
+    console.error(`📷 Error checking photo quality for @${username}:`, e.message);
+    return null;
+  }
+}
+
+// Load promo photo quality data from Redis
+async function loadPromoPhotoQualityData() {
+  try {
+    const data = await redis.get('s4s:promo-photo-quality');
+    if (data) {
+      promoPhotoQuality.flaggedPhotos = new Map(Object.entries(data.flaggedPhotos || {}));
+      promoPhotoQuality.checkedPhotos = new Set(data.checkedPhotos || []);
+      promoPhotoQuality.totalChecked = data.totalChecked || 0;
+      promoPhotoQuality.totalFlagged = data.totalFlagged || 0;
+      console.log(`📷 Loaded promo photo quality data: ${promoPhotoQuality.totalChecked} checked, ${promoPhotoQuality.totalFlagged} flagged`);
+    }
+  } catch (e) {
+    console.error('Failed to load promo photo quality data:', e.message);
+  }
+}
 
 function getAccountBreaker(accountId) {
   if (!perAccountCircuitBreaker[accountId]) {
@@ -511,7 +782,66 @@ function isAccountTripped(accountId) {
 
 function resetAccountBreaker(accountId) {
   if (perAccountCircuitBreaker[accountId]) {
-    perAccountCircuitBreaker[accountId] = { consecutiveFailures: 0, lastFailure: null, trippedAt: null, skippedSince: null };
+    perAccountCircuitBreaker[accountId] = { consecutiveFailures: 0, lastFailure: null, trippedAt: null, skippedSince: null, lastAlert: null };
+  }
+  // Clear alert tracking when account is reset
+  if (reconnectAlerts[accountId]) {
+    delete reconnectAlerts[accountId];
+  }
+}
+
+// Send reconnect alert to Kiefer with 24h rate limiting
+async function sendReconnectAlert(accountId, reason, context = '') {
+  try {
+    const now = Date.now();
+    const lastAlert = reconnectAlerts[accountId] || 0;
+    const TWENTY_FOUR_HOURS = 24 * 60 * 60 * 1000;
+    
+    // Rate limit: max 1 alert per model per 24 hours
+    if (now - lastAlert < TWENTY_FOUR_HOURS) {
+      console.log(`🔕 Skipping reconnect alert for ${accountId} (last alert ${Math.round((now - lastAlert) / 3600000)}h ago)`);
+      return;
+    }
+    
+    const username = accountIdToUsername[accountId] || 'unknown';
+    const hoursAgo = lastAlert ? Math.round((now - lastAlert) / 3600000) : 'never';
+    
+    // Create OFAPI dashboard link for easy reconnection
+    const ofapiDashboardUrl = 'https://app.onlyfansapi.com/dashboard/accounts';
+    
+    const alertMsg = `🔌 Auto-Reconnect Alert\n\n` +
+      `Model: @${username}\n` +
+      `Account ID: ${accountId}\n` +
+      `Issue: ${reason}\n` +
+      `${context ? `Context: ${context}\n` : ''}` +
+      `Last alert: ${hoursAgo === 'never' ? 'Never' : `${hoursAgo}h ago`}\n\n` +
+      `🔗 OFAPI Dashboard: ${ofapiDashboardUrl}\n\n` +
+      `Please refresh this model's session to reconnect. Other models continue normally.`;
+
+    const response = await fetch(`https://api.telegram.org/bot${process.env.TELEGRAM_BOT_TOKEN}/sendMessage`, {
+      method: 'POST',
+      headers: { 'Content-Type': 'application/json' },
+      body: JSON.stringify({
+        chat_id: process.env.TELEGRAM_ALERT_CHAT_ID || '5505937268',
+        text: alertMsg,
+        parse_mode: 'HTML'
+      })
+    });
+
+    if (response.ok) {
+      reconnectAlerts[accountId] = now;
+      console.log(`📨 Reconnect alert sent for @${username} (${reason})`);
+      
+      // Update circuit breaker with alert timestamp
+      if (perAccountCircuitBreaker[accountId]) {
+        perAccountCircuitBreaker[accountId].lastAlert = now;
+      }
+    } else {
+      console.error(`Failed to send reconnect alert: ${response.status}`);
+    }
+    
+  } catch (e) {
+    console.error('Error sending reconnect alert:', e.message);
   }
 }
 
@@ -966,6 +1296,10 @@ const SPECIAL_MODELS = {
     noMassDm: true,
     noPinnedPost: true,
     label: 'Promoter only · 24 tags/day · No DM/Pinned'
+  },
+  'saralovexx': {
+    noPinnedPost: true,
+    label: 'No pinned posts on her page'
   }
 };
 
@@ -1024,11 +1358,289 @@ async function filterToConnectedModels(vaultMappings) {
   }
 }
 
+// Track conversion from promotional posts to follows/subs
+async function trackConversion(promoter, target, type = 'follow') {
+  try {
+    if (!conversionData.promoters[promoter]) {
+      conversionData.promoters[promoter] = {};
+    }
+    if (!conversionData.promoters[promoter][target]) {
+      conversionData.promoters[promoter][target] = { follows: 0, subs: 0, tags: 0, conversionRate: 0.0 };
+    }
+    
+    const data = conversionData.promoters[promoter][target];
+    if (type === 'follow') data.follows++;
+    if (type === 'sub') data.subs++;
+    
+    // Update conversion rate (follows + subs) / tags
+    if (data.tags > 0) {
+      data.conversionRate = (data.follows + data.subs) / data.tags;
+    }
+    
+    conversionData.lastUpdated = Date.now();
+    conversionData.totalConversions++;
+    
+    // Persist to Redis every 10 conversions
+    if (conversionData.totalConversions % 10 === 0) {
+      await redis.set('s4s:conversion-data', conversionData);
+    }
+    
+    console.log(`📈 Conversion tracked: ${promoter} → @${target} (${type}), rate: ${(data.conversionRate * 100).toFixed(1)}%`);
+  } catch (e) {
+    console.error('Error tracking conversion:', e.message);
+  }
+}
+
+// Load conversion data from Redis on startup
+async function loadConversionData() {
+  try {
+    const data = await redis.get('s4s:conversion-data');
+    if (data && data.promoters) {
+      conversionData = { ...data };
+      console.log(`📈 Loaded conversion data: ${Object.keys(data.promoters).length} promoters tracked`);
+    }
+  } catch (e) {
+    console.error('Failed to load conversion data:', e.message);
+  }
+}
+
+// Load dead model detection data from Redis
+async function loadDeadModelData() {
+  try {
+    const data = await redis.get('s4s:dead-model-detection');
+    if (data) {
+      deadModelDetection = { 
+        ...deadModelDetection, 
+        ...data,
+        flaggedModels: new Set(data.flaggedModels || []) // Convert back to Set
+      };
+      console.log(`💀 Loaded dead model detection: ${deadModelDetection.flaggedModels.size} flagged models`);
+    }
+  } catch (e) {
+    console.error('Failed to load dead model detection data:', e.message);
+  }
+}
+
+// Take daily subscriber count snapshot for all models
+async function takeDailySnapshot() {
+  try {
+    const today = new Date().toISOString().slice(0, 10); // YYYY-MM-DD
+    if (deadModelDetection.lastSnapshotDate === today) {
+      console.log('📊 Daily snapshot already taken today');
+      return;
+    }
+    
+    console.log('📊 Taking daily subscriber count snapshot...');
+    const accountMap = await loadModelAccounts();
+    const snapshot = {};
+    let successful = 0;
+    let failed = 0;
+    
+    // Take snapshots in batches to avoid rate limits
+    const usernames = Object.keys(accountMap);
+    const BATCH_SIZE = 10;
+    
+    for (let i = 0; i < usernames.length; i += BATCH_SIZE) {
+      const batch = usernames.slice(i, i + BATCH_SIZE);
+      
+      const batchPromises = batch.map(async (username) => {
+        const accountId = accountMap[username];
+        try {
+          const res = await fetch(`${OF_API_BASE}/${accountId}/me`, {
+            headers: { 'Authorization': `Bearer ${OF_API_KEY}` },
+            signal: AbortSignal.timeout(10000) // 10s timeout
+          });
+          
+          if (res.ok) {
+            const data = await res.json();
+            const subCount = data.subscribersCount || data.subscribers_count || 0;
+            snapshot[username] = subCount;
+            successful++;
+            return { username, success: true, subCount };
+          } else {
+            failed++;
+            return { username, success: false, error: res.status };
+          }
+        } catch (e) {
+          failed++;
+          return { username, success: false, error: e.message };
+        }
+      });
+      
+      await Promise.allSettled(batchPromises);
+      
+      // Rate limit: wait between batches
+      if (i + BATCH_SIZE < usernames.length) {
+        await new Promise(r => setTimeout(r, 2000));
+      }
+    }
+    
+    // Save snapshot
+    deadModelDetection.dailySnapshots[today] = snapshot;
+    deadModelDetection.lastSnapshotDate = today;
+    
+    // Keep only last 30 days of snapshots
+    const dates = Object.keys(deadModelDetection.dailySnapshots).sort();
+    if (dates.length > 30) {
+      const toDelete = dates.slice(0, dates.length - 30);
+      for (const date of toDelete) {
+        delete deadModelDetection.dailySnapshots[date];
+      }
+    }
+    
+    console.log(`📊 Snapshot complete: ${successful} successful, ${failed} failed`);
+    
+    // Detect dead models after taking snapshot
+    await detectDeadModels();
+    
+    // Persist to Redis
+    await redis.set('s4s:dead-model-detection', {
+      ...deadModelDetection,
+      flaggedModels: [...deadModelDetection.flaggedModels] // Convert Set to Array for JSON
+    });
+    
+  } catch (error) {
+    console.error('Error taking daily snapshot:', error);
+  }
+}
+
+// Detect models with 0 new subs after 2 weeks of S4S promotion
+async function detectDeadModels() {
+  try {
+    const today = new Date().toISOString().slice(0, 10);
+    const twoWeeksAgo = new Date(Date.now() - 14 * 24 * 60 * 60 * 1000).toISOString().slice(0, 10);
+    
+    // Need at least 2 weeks of data
+    if (!deadModelDetection.dailySnapshots[twoWeeksAgo] || !deadModelDetection.dailySnapshots[today]) {
+      console.log('💀 Not enough data for dead model detection (need 2+ weeks)');
+      return;
+    }
+    
+    const oldSnapshot = deadModelDetection.dailySnapshots[twoWeeksAgo];
+    const newSnapshot = deadModelDetection.dailySnapshots[today];
+    const newlyFlagged = [];
+    
+    for (const [username, oldCount] of Object.entries(oldSnapshot)) {
+      // Skip if model is already flagged
+      if (deadModelDetection.flaggedModels.has(username)) continue;
+      
+      const newCount = newSnapshot[username];
+      if (newCount === undefined) continue; // Model disconnected
+      
+      // Check if model has 0 subscriber growth over 2 weeks
+      const growth = newCount - oldCount;
+      if (growth <= 0) {
+        // Verify model was actually being promoted (has received tags)
+        let wasPromoted = false;
+        if (conversionData.promoters) {
+          for (const [promoter, targets] of Object.entries(conversionData.promoters)) {
+            if (targets[username] && targets[username].tags > 0) {
+              wasPromoted = true;
+              break;
+            }
+          }
+        }
+        
+        if (wasPromoted) {
+          deadModelDetection.flaggedModels.add(username);
+          newlyFlagged.push({ username, oldCount, newCount, growth });
+          console.log(`💀 Flagged dead model: @${username} (${oldCount} → ${newCount} subs over 2 weeks)`);
+        }
+      }
+    }
+    
+    if (newlyFlagged.length > 0) {
+      console.log(`💀 Detected ${newlyFlagged.length} new dead models: ${newlyFlagged.map(m => m.username).join(', ')}`);
+      
+      // Send Telegram notification
+      const alertMsg = `💀 Dead Model Alert: ${newlyFlagged.length} models flagged with 0 sub growth after 2 weeks of S4S promotion:\n\n${
+        newlyFlagged.map(m => `@${m.username}: ${m.oldCount} → ${m.newCount} subs (${m.growth >= 0 ? '+' : ''}${m.growth})`).join('\n')
+      }\n\nThese models may need review or removal from rotation.`;
+      
+      try {
+        await fetch(`https://api.telegram.org/bot${process.env.TELEGRAM_BOT_TOKEN}/sendMessage`, {
+          method: 'POST',
+          headers: { 'Content-Type': 'application/json' },
+          body: JSON.stringify({ 
+            chat_id: process.env.TELEGRAM_ALERT_CHAT_ID || '5505937268', 
+            text: alertMsg 
+          })
+        });
+      } catch (e) {
+        console.error('Failed to send dead model alert:', e);
+      }
+    }
+  } catch (error) {
+    console.error('Error detecting dead models:', error);
+  }
+}
+
+// Get weighted targets based on conversion rates
+function getWeightedTargets(promoter, allTargets, targetCount) {
+  const promoterData = conversionData.promoters[promoter];
+  if (!promoterData) {
+    // No conversion data yet, use equal distribution
+    return allTargets.slice(0, targetCount);
+  }
+  
+  // Calculate weights: high conversion rate = more slots
+  const targetWeights = allTargets.map(target => {
+    const data = promoterData[target];
+    if (!data || data.tags < 5) {
+      // Not enough data, use baseline weight of 1.0
+      return { target, weight: 1.0, conversionRate: 0.0, tags: 0 };
+    }
+    
+    // Weight based on conversion rate: 0-5% = 0.5x, 5-10% = 1.0x, >10% = 1.5x, >20% = 2.0x
+    let weight = 1.0;
+    if (data.conversionRate > 0.20) weight = 2.0;
+    else if (data.conversionRate > 0.10) weight = 1.5;
+    else if (data.conversionRate < 0.05) weight = 0.5;
+    
+    return { target, weight, conversionRate: data.conversionRate, tags: data.tags };
+  });
+  
+  // Create weighted list by repeating high-conversion targets
+  const weightedList = [];
+  for (const { target, weight } of targetWeights) {
+    const slots = Math.max(1, Math.round(weight));
+    for (let i = 0; i < slots; i++) {
+      weightedList.push(target);
+    }
+  }
+  
+  // Shuffle and take the needed count
+  const shuffled = weightedList.sort(() => Math.random() - 0.5);
+  const selected = [];
+  const used = new Set();
+  
+  for (const target of shuffled) {
+    if (selected.length >= targetCount) break;
+    if (!used.has(target)) {
+      selected.push(target);
+      used.add(target);
+    }
+  }
+  
+  // Fill remaining slots if we don't have enough unique targets
+  while (selected.length < targetCount && selected.length < allTargets.length) {
+    for (const target of allTargets) {
+      if (!used.has(target)) {
+        selected.push(target);
+        used.add(target);
+        break;
+      }
+    }
+  }
+  
+  return selected.slice(0, targetCount);
+}
+
 function generateDailySchedule(models, vaultMappings) {
   const schedule = {};
   const now = Date.now();
   
-  // EQUAL PROMOTION: Track how many times each target is assigned globally
+  // SMART WEIGHTING: Track how many times each target is assigned globally with conversion weighting
   const targetableModels = models.filter(m => !PROMOTER_ONLY.has(m) && !NO_PROMOTE.has(m));
   const globalTargetCount = {};
   for (const t of targetableModels) globalTargetCount[t] = 0;
@@ -1048,8 +1660,10 @@ function generateDailySchedule(models, vaultMappings) {
     const tagsPerDay = SPECIAL_MODELS[model]?.tagsPerDay || (PROMOTER_ONLY.has(model) ? 240 : 57);
     const baseInterval = (24 * 60 * 60 * 1000) / tagsPerDay;
     
-    // Build target list using LEAST-PROMOTED-FIRST strategy
-    // Each tag slot picks the target with the lowest global count (among this model's available targets)
+    // Build target list using SMART WEIGHTING + LEAST-PROMOTED-FIRST strategy
+    // Get weighted targets based on conversion rates, then balance globally
+    const weightedTargets = getWeightedTargets(model, targets, tagsPerDay);
+    
     // DEDUP: enforce minimum 4hr gap between same promoter→target
     const MIN_TARGET_GAP_MS = 4 * 60 * 60 * 1000; // 4 hours
     const orderedTargets = [];
@@ -1061,21 +1675,32 @@ function generateDailySchedule(models, vaultMappings) {
     for (let i = 0; i < tagsPerDay; i++) {
       const slotTime = currentTime + (Math.random() - 0.5) * 6 * 60 * 1000;
       
-      // Sort available targets by global count (ascending), break ties randomly
-      // Filter out targets that were scheduled too recently for this model
-      const eligible = [...targets].filter(t => {
+      // Use weighted targets but still respect cooldowns and global balance
+      const eligible = weightedTargets.filter(t => {
         const last = lastScheduledTime[t];
         return !last || (slotTime - last) >= MIN_TARGET_GAP_MS;
       });
       
-      // If all targets are on cooldown, pick the one with the oldest schedule
-      const pool = eligible.length > 0 ? eligible : [...targets];
+      // If all weighted targets are on cooldown, fall back to any available target
+      const pool = eligible.length > 0 ? eligible : targets;
       const sorted = pool.sort((a, b) => {
+        // First priority: conversion rate if we have data
+        const promoterData = conversionData.promoters[model];
+        if (promoterData && promoterData[a] && promoterData[b]) {
+          const rateA = promoterData[a].conversionRate || 0;
+          const rateB = promoterData[b].conversionRate || 0;
+          const rateDiff = rateB - rateA; // Higher conversion rate first
+          if (Math.abs(rateDiff) > 0.05) return rateDiff; // 5% threshold
+        }
+        
+        // Second priority: global balance (least promoted first)
         const diff = (globalTargetCount[a] || 0) - (globalTargetCount[b] || 0);
         if (diff !== 0) return diff;
+        
         // Tie-break: prefer target not recently used
         return (lastScheduledTime[a] || 0) - (lastScheduledTime[b] || 0);
       });
+      
       const picked = sorted[0];
       orderedTargets.push(picked);
       globalTargetCount[picked] = (globalTargetCount[picked] || 0) + 1;
@@ -1128,6 +1753,7 @@ async function executeTag(promoter, target, vaultId, accountId) {
   
   try {
     apiCallStats.rotation++; // Fix 6: Increment API call counter
+    trackCreditsUsed(1); // Track 1 credit for ghost tag creation
     const res = await fetch(`${OF_API_BASE}/${accountId}/posts`, {
       method: 'POST',
       headers: {
@@ -1184,6 +1810,7 @@ async function deletePost(postId, accountId, _retryCount = 0) {
   
   try {
     apiCallStats.deletes++; // Fix 6: Increment API call counter
+    trackCreditsUsed(1); // Track 1 credit for delete
     const res = await fetch(`${OF_API_BASE}/${accountId}/posts/${postId}`, {
       method: 'DELETE',
       headers: { 'Authorization': `Bearer ${OF_API_KEY}` }
@@ -1216,13 +1843,10 @@ async function deletePost(postId, accountId, _retryCount = 0) {
         updateGlobalBreakerStats();
         persistSkipAccounts();
         rotationState.stats.totalDeleteFailures++;
-        // Alert
-        const alertMsg = `🔒 S4S: Account ${accountId} (@${accountIdToUsername[accountId] || 'unknown'}) session expired (401)\n\nCircuit breaker tripped for this account only. Other accounts continue normally.\n\nPost ${postId} could not be deleted. Tell the OF API crew to refresh this session.`;
-        fetch(`https://api.telegram.org/bot${process.env.TELEGRAM_BOT_TOKEN}/sendMessage`, {
-          method: 'POST',
-          headers: { 'Content-Type': 'application/json' },
-          body: JSON.stringify({ chat_id: process.env.TELEGRAM_ALERT_CHAT_ID || '5505937268', text: alertMsg })
-        }).catch(e => console.error('Failed to send Telegram alert:', e));
+        
+        // Send auto-reconnect alert with rate limiting (non-blocking)
+        sendReconnectAlert(accountId, 'Session expired (401)', `Post ${postId} delete failed`)
+          .catch(e => console.error('Failed to send reconnect alert:', e));
         return false;
       }
 
@@ -1291,13 +1915,12 @@ function onDeleteFailure(postId, accountId, reason) {
     console.error(`🛑 CIRCUIT BREAKER TRIPPED for account ${accountId} — ${breaker.consecutiveFailures} consecutive delete failures. Skipping this account only.`);
     updateGlobalBreakerStats();
     
-    // Alert via Telegram — account-specific, rotation continues
-    const alertMsg = `🛑 S4S: Circuit breaker tripped for account ${accountId} (@${accountIdToUsername[accountId] || 'unknown'})\n\n${breaker.consecutiveFailures} consecutive delete failures — this account will be skipped.\n\nLast failure: post ${postId}\nReason: ${reason}\n\nAll other accounts continue normally. Reset with /circuit-breaker/reset/${accountId}`;
-    fetch(`https://api.telegram.org/bot${process.env.TELEGRAM_BOT_TOKEN}/sendMessage`, {
-      method: 'POST',
-      headers: { 'Content-Type': 'application/json' },
-      body: JSON.stringify({ chat_id: process.env.TELEGRAM_ALERT_CHAT_ID || '5505937268', text: alertMsg })
-    }).catch(e => console.error('Failed to send Telegram alert:', e));
+    // Send auto-reconnect alert with rate limiting (non-blocking)
+    sendReconnectAlert(
+      accountId, 
+      `Circuit breaker tripped (${breaker.consecutiveFailures} failures)`, 
+      `Last failure: post ${postId} - ${reason}`
+    ).catch(e => console.error('Failed to send reconnect alert:', e));
   }
 }
 
@@ -1404,6 +2027,16 @@ async function runRotationCycle() {
           rotationState.executedTags = rotationState.executedTags.slice(-50);
         }
         
+        // Track tag for conversion rate calculation
+        if (!conversionData.promoters[model]) {
+          conversionData.promoters[model] = {};
+        }
+        if (!conversionData.promoters[model][sched.target]) {
+          conversionData.promoters[model][sched.target] = { follows: 0, subs: 0, tags: 0, conversionRate: 0.0 };
+        }
+        conversionData.promoters[model][sched.target].tags++;
+        conversionData.totalTags++;
+        
         // PERSIST pending delete to Redis immediately
         await addPendingDelete(postId, accountId, model, sched.target);
         rotationState.stats.totalTags++;
@@ -1480,6 +2113,37 @@ cron.schedule('*/30 * * * *', async () => {
       }
     } catch (e) {
       console.log(`⏭️ Account ${accountId} probe failed: ${e.message}`);
+    }
+  }
+});
+
+// Fix: Auto-recovery for circuit-breaker-tripped accounts (every 30 min)
+// The skipAccounts probe above only handles 401s. This handles 503 transient failures.
+cron.schedule('15,45 * * * *', async () => {
+  const trippedEntries = Object.entries(perAccountCircuitBreaker)
+    .filter(([_, b]) => b.consecutiveFailures >= DELETE_CIRCUIT_BREAKER.threshold);
+  if (trippedEntries.length === 0) return;
+  console.log(`🔍 Probing ${trippedEntries.length} circuit-breaker-tripped account(s) for recovery...`);
+  for (const [accountId, breaker] of trippedEntries) {
+    try {
+      const res = await fetch(`${OF_API_BASE}/${accountId}/me`, {
+        headers: { 'Authorization': `Bearer ${OF_API_KEY}` }
+      });
+      if (res.ok) {
+        const username = accountIdToUsername[accountId] || 'unknown';
+        console.log(`✅ Circuit breaker recovery: ${accountId} (@${username}) responding — resetting breaker`);
+        resetAccountBreaker(accountId);
+        updateGlobalBreakerStats();
+        fetch(`https://api.telegram.org/bot${process.env.TELEGRAM_BOT_TOKEN}/sendMessage`, {
+          method: 'POST',
+          headers: { 'Content-Type': 'application/json' },
+          body: JSON.stringify({ chat_id: process.env.TELEGRAM_ALERT_CHAT_ID || '5505937268', text: `✅ S4S: @${username} circuit breaker auto-recovered. Back in rotation.` })
+        }).catch(() => {});
+      } else {
+        console.log(`⏭️ Tripped account ${accountId} still failing (${res.status})`);
+      }
+    } catch (e) {
+      console.log(`⏭️ Tripped account ${accountId} probe error: ${e.message}`);
     }
   }
 });
@@ -1641,12 +2305,10 @@ async function createPinnedPost(promoterAccountId, targetUsername, vaultId) {
       skipAccounts.add(promoterAccountId);
       updateGlobalBreakerStats();
       await persistSkipAccounts();
-      const alertMsg = `🔒 S4S: Account ${promoterAccountId} (@${accountIdToUsername[promoterAccountId] || 'unknown'}) session expired (401) during pinned post creation for @${targetUsername}`;
-      fetch(`https://api.telegram.org/bot${process.env.TELEGRAM_BOT_TOKEN}/sendMessage`, {
-        method: 'POST',
-        headers: { 'Content-Type': 'application/json' },
-        body: JSON.stringify({ chat_id: process.env.TELEGRAM_ALERT_CHAT_ID || '5505937268', text: alertMsg })
-      }).catch(e => console.error('Failed to send Telegram alert:', e));
+      
+      // Send auto-reconnect alert (non-blocking)
+      sendReconnectAlert(promoterAccountId, 'Session expired (401)', `Pinned post creation failed for @${targetUsername}`)
+        .catch(e => console.error('Failed to send reconnect alert:', e));
       return null;
     }
     
@@ -1989,7 +2651,7 @@ const MASS_DM_CAPTIONS = [
   "She just started and already this fine?? go see @{target} 😩",
 ];
 
-// 12 time windows in UTC hours (AST + 4)
+// Mass DM windows - 12 every 2 hours, full 24h coverage. DO NOT CHANGE without Kiefer's approval.
 const MASS_DM_WINDOWS_UTC = [
   { startHour: 4 },   // 12:00 AM - 1:00 AM AST
   { startHour: 6 },   // 2:00 AM - 3:00 AM AST
@@ -2058,29 +2720,31 @@ async function generateMassDmSchedule() {
   const intervalMinutes = 60 / allModels.length;
   const schedule = {};
   
-  // Build schedule for regular models (12 windows)
+  // Build schedule for regular models using dynamic windows (optimized for peak hours)
   const shuffleArray = arr => [...arr].sort(() => Math.random() - 0.5);
   
   for (let windowIdx = 0; windowIdx < MASS_DM_WINDOWS_UTC.length; windowIdx++) {
     const window = MASS_DM_WINDOWS_UTC[windowIdx];
     const regularModels = allModels.filter(m => !PROMOTER_ONLY.has(m));
     const shuffledModels = shuffleArray(regularModels);
-    const regularInterval = 60 / regularModels.length;
+    const regularInterval = Math.max(1, 60 / Math.max(1, regularModels.length)); // Prevent division by zero
     
     for (let modelIdx = 0; modelIdx < shuffledModels.length; modelIdx++) {
       const model = shuffledModels[modelIdx];
-      const target = modelTargets[model]?.[windowIdx];
+      const target = modelTargets[model]?.[windowIdx % (modelTargets[model]?.length || 1)];
       if (!target) continue;
       
-      const offsetMinutes = Math.round(modelIdx * regularInterval);
+      const offsetMinutes = Math.round(modelIdx * regularInterval) + (window.startMinute || 0);
       const scheduled = new Date(now);
-      scheduled.setUTCHours(window.startHour, offsetMinutes, 0, 0);
+      scheduled.setUTCHours(window.startHour, offsetMinutes % 60, 0, 0);
       if (window.startHour < 4) scheduled.setUTCDate(scheduled.getUTCDate() + 1);
       
       const vaultId = vaultMappings[model]?.[target];
       if (!schedule[model]) schedule[model] = [];
       schedule[model].push({
-        target, windowIndex: windowIdx,
+        target, 
+        windowIndex: windowIdx,
+        windowType: window.type || 'regular',
         scheduledTime: scheduled.toISOString(),
         vaultId: vaultId || null,
         executed: false, failed: false, sentAt: null,
@@ -2118,7 +2782,12 @@ async function generateMassDmSchedule() {
   await redis.set('s4s:mass-dm-history', history);
   
   const totalDms = Object.values(schedule).reduce((sum, entries) => sum + entries.length, 0);
-  console.log(`📨 Mass DM schedule generated: ${allModels.length} models × ${intervalMinutes.toFixed(1)} min intervals × ${MASS_DM_WINDOWS_UTC.length} windows = ${totalDms} DMs for ${todayStr}`);
+  const peakDms = Object.values(schedule).reduce((sum, entries) => 
+    sum + entries.filter(e => e.windowType === 'peak').length, 0);
+  const regularDms = Object.values(schedule).reduce((sum, entries) => 
+    sum + entries.filter(e => e.windowType === 'regular').length, 0);
+  
+  console.log(`📨 Mass DM schedule generated: ${allModels.length} models × ${MASS_DM_WINDOWS_UTC.length} windows = ${totalDms} DMs for ${todayStr} (${peakDms} peak, ${regularDms} regular)`);
 }
 
 // SFS Exclude list IDs per account (username → array of list IDs)
@@ -2192,7 +2861,6 @@ const SFS_EXCLUDE_LISTS_HARDCODED = {
   "lexiwilderrr": ["1267457291"],
   "lindsaycahill": ["1265802709"],
   "lunalatinaaa": ["1265562140"],
-  "rarilynfaye": ["1266683901"],
   "siennavane": ["1264560990"],
   "summerxbrookes": ["1267969606"],
   "tatumhill": ["1264318890"],
@@ -3882,6 +4550,7 @@ async function sendMassDm(promoterUsername, targetUsername, vaultId, accountId) 
     
     console.log(`📨 Mass DM ${promoterUsername} → @${targetUsername} | exclude: ${excludedLists.length > 0 ? JSON.stringify(excludedLists) : 'NONE'}`);
     apiCallStats.massDm++; // Fix 6: Increment API call counter
+    trackCreditsUsed(1); // Track 1 credit for mass DM
     const res = await fetch(`${OF_API_BASE}/${accountId}/mass-messaging`, {
       method: 'POST',
       headers: {
@@ -3928,12 +4597,10 @@ async function sendMassDm(promoterUsername, targetUsername, vaultId, accountId) 
       skipAccounts.add(accountId);
       updateGlobalBreakerStats();
       await persistSkipAccounts();
-      const alertMsg = `🔒 S4S: Account ${accountId} (@${accountIdToUsername[accountId] || 'unknown'}) session expired (401) during mass DM\n\nCircuit breaker tripped. Other accounts continue normally.\n\nMass DM ${promoterUsername} → @${targetUsername} failed.`;
-      fetch(`https://api.telegram.org/bot${process.env.TELEGRAM_BOT_TOKEN}/sendMessage`, {
-        method: 'POST',
-        headers: { 'Content-Type': 'application/json' },
-        body: JSON.stringify({ chat_id: process.env.TELEGRAM_ALERT_CHAT_ID || '5505937268', text: alertMsg })
-      }).catch(e => console.error('Failed to send Telegram alert:', e));
+      
+      // Send auto-reconnect alert (non-blocking)
+      sendReconnectAlert(accountId, 'Session expired (401)', `Mass DM failed: ${promoterUsername} → @${targetUsername}`)
+        .catch(e => console.error('Failed to send reconnect alert:', e));
       return false;
     }
     
@@ -3972,10 +4639,24 @@ async function _processMassDmScheduleInner() {
   console.log(`📨 Mass DM cron tick — enabled=${enabled} (type: ${typeof enabled})`);
   if (enabled === false) return;
   
-  const data = await redis.get('s4s:mass-dm-schedule');
-  if (!data || !data.schedule) {
-    console.log(`📨 Mass DM: no schedule data — data=${!!data}, schedule=${!!(data && data.schedule)}`);
-    return;
+  let data = await redis.get('s4s:mass-dm-schedule');
+  
+  // SELF-HEALING: If schedule is missing or stale (not today's date), auto-regenerate
+  const todayStr = new Date().toISOString().slice(0, 10);
+  if (!data || !data.schedule || data.date !== todayStr) {
+    console.log(`📨 Mass DM: STALE SCHEDULE detected (have: ${data?.date || 'none'}, need: ${todayStr}) — auto-regenerating`);
+    try {
+      await generateMassDmSchedule();
+      data = await redis.get('s4s:mass-dm-schedule');
+      if (!data || !data.schedule) {
+        console.error('📨 Mass DM: regeneration failed — no schedule after generate');
+        return;
+      }
+      console.log(`📨 Mass DM: auto-regenerated schedule for ${todayStr}`);
+    } catch (e) {
+      console.error(`📨 Mass DM: auto-regeneration FAILED: ${e.message}`);
+      return;
+    }
   }
   
   const now = Date.now();
@@ -4094,9 +4775,27 @@ cron.schedule('* * * * *', async () => {
 
 // Generate mass DM schedule at midnight UTC (8pm AST)
 cron.schedule('0 0 * * *', async () => {
-  const enabled = await redis.get('s4s:mass-dm-enabled');
-  if (enabled === false) return;
-  await generateMassDmSchedule();
+  try {
+    const enabled = await redis.get('s4s:mass-dm-enabled');
+    if (enabled === false) return;
+    await generateMassDmSchedule();
+    console.log('📨 Midnight mass DM schedule regeneration: SUCCESS');
+  } catch (e) {
+    console.error(`📨 Midnight mass DM schedule regeneration FAILED: ${e.message}\n${e.stack}`);
+    // Will self-heal on next cron tick via staleness check
+  }
+});
+
+// Take daily subscriber count snapshot at 2am UTC (10pm AST)
+cron.schedule('0 2 * * *', async () => {
+  console.log('📊 Starting daily subscriber count snapshot...');
+  await takeDailySnapshot();
+});
+
+// Check credit budget daily at 3am UTC (11pm AST)
+cron.schedule('0 3 * * *', async () => {
+  console.log('💳 Checking credit budget projection...');
+  await checkCreditBudgetAlert();
 });
 
 // Auto-unsend mass DMs from promoter-only models after ~55 minutes
@@ -4276,6 +4975,192 @@ app.get('/mass-dm/sent', async (req, res) => {
 app.post('/mass-dm/disable', requireApiKey, async (req, res) => {
   await redis.set('s4s:mass-dm-enabled', false);
   res.json({ enabled: false, message: 'Mass DM system disabled — pending DMs will not be sent' });
+});
+
+// Mass DM timing info (read-only — windows are locked, change requires code deploy + Kiefer approval)
+app.get('/mass-dm/timing-config', async (req, res) => {
+  res.json({
+    mode: 'locked',
+    windows: MASS_DM_WINDOWS_UTC.length,
+    schedule: MASS_DM_WINDOWS_UTC.map(w => {
+      const astHour = ((w.startHour - 4) + 24) % 24;
+      return `${astHour}:00 AST`;
+    }),
+    message: 'Mass DM windows are locked to 12 every-2-hour windows. Change requires code deploy + Kiefer approval.'
+  });
+});
+
+// DISABLED — timing config changes locked. DO NOT re-enable without Kiefer's explicit approval.
+app.post('/mass-dm/timing-config', requireApiKey, async (req, res) => {
+  return res.status(403).json({ error: 'Mass DM timing is locked. Change requires code deploy + Kiefer approval.' });
+  // Original code below kept for reference but unreachable
+  const { peakHours, deadHours, peakWindowsPerHour, regularWindowsPerHour, deadWindowsPerHour } = req.body;
+  
+  try {
+    if (peakHours && !Array.isArray(peakHours)) {
+      return res.status(400).json({ error: 'peakHours must be an array of UTC hours (0-23)' });
+    }
+    if (deadHours && !Array.isArray(deadHours)) {
+      return res.status(400).json({ error: 'deadHours must be an array of UTC hours (0-23)' });
+    }
+    
+    // Update configuration
+    if (peakHours) MASS_DM_CONFIG.peakHours = peakHours.filter(h => h >= 0 && h <= 23);
+    if (deadHours) MASS_DM_CONFIG.deadHours = deadHours.filter(h => h >= 0 && h <= 23);
+    if (peakWindowsPerHour !== undefined) MASS_DM_CONFIG.peakWindowsPerHour = Math.max(0, Math.min(10, peakWindowsPerHour));
+    if (regularWindowsPerHour !== undefined) MASS_DM_CONFIG.regularWindowsPerHour = Math.max(0, Math.min(5, regularWindowsPerHour));
+    if (deadWindowsPerHour !== undefined) MASS_DM_CONFIG.deadWindowsPerHour = Math.max(0, Math.min(2, deadWindowsPerHour));
+    
+    MASS_DM_CONFIG.lastUpdated = Date.now();
+    
+    // Regenerate windows with new config
+    MASS_DM_WINDOWS_UTC = generateMassDmWindows();
+    
+    // Persist to Redis
+    await redis.set('s4s:mass-dm-timing-config', MASS_DM_CONFIG);
+    
+    res.json({
+      ok: true,
+      config: MASS_DM_CONFIG,
+      newWindowCount: MASS_DM_WINDOWS_UTC.length,
+      message: 'Mass DM timing configuration updated. Next schedule generation will use new settings.'
+    });
+  } catch (error) {
+    res.status(500).json({ error: error.message });
+  }
+});
+
+// Reset to default timing configuration
+app.post('/mass-dm/timing-config/reset', requireApiKey, async (req, res) => {
+  MASS_DM_CONFIG = {
+    peakHours: [0, 1, 2, 22, 23], // 8-11pm AST
+    deadHours: [7, 8, 9, 10, 11], // 3-7am AST
+    peakWindowsPerHour: 3,
+    regularWindowsPerHour: 1,
+    deadWindowsPerHour: 0,
+    lastUpdated: Date.now()
+  };
+  
+  MASS_DM_WINDOWS_UTC = generateMassDmWindows();
+  await redis.set('s4s:mass-dm-timing-config', MASS_DM_CONFIG);
+  
+  res.json({
+    ok: true,
+    config: MASS_DM_CONFIG,
+    message: 'Mass DM timing configuration reset to defaults'
+  });
+});
+
+// === PROMO PHOTO QUALITY CHECK ENDPOINTS ===
+
+// Get promo photo quality report
+app.get('/promo-photos/quality', async (req, res) => {
+  const flaggedPhotos = [...promoPhotoQuality.flaggedPhotos.values()];
+  
+  res.json({
+    totalChecked: promoPhotoQuality.totalChecked,
+    totalFlagged: promoPhotoQuality.totalFlagged,
+    flaggedPhotos: flaggedPhotos.sort((a, b) => b.flaggedAt - a.flaggedAt), // newest first
+    flaggedByModel: flaggedPhotos.reduce((acc, photo) => {
+      if (!acc[photo.username]) acc[photo.username] = 0;
+      acc[photo.username]++;
+      return acc;
+    }, {})
+  });
+});
+
+// Manually check a specific vault ID
+app.post('/promo-photos/check/:vaultId', requireApiKey, async (req, res) => {
+  const { vaultId } = req.params;
+  const { username, accountId } = req.body;
+  
+  if (!username || !accountId) {
+    return res.status(400).json({ error: 'username and accountId required' });
+  }
+  
+  try {
+    const result = await checkPromoPhotoQuality(vaultId, username, accountId);
+    
+    if (result) {
+      res.json({
+        flagged: true,
+        ...result,
+        message: `Photo flagged: ${result.issues.join(', ')}`
+      });
+    } else {
+      res.json({
+        flagged: false,
+        message: 'Photo quality passed all checks'
+      });
+    }
+  } catch (error) {
+    res.status(500).json({ error: error.message });
+  }
+});
+
+// Check quality for all photos in vault mappings
+app.post('/promo-photos/check-all', requireApiKey, async (req, res) => {
+  try {
+    console.log('📷 Starting bulk promo photo quality check...');
+    
+    const vaultMappings = await loadVaultMappings();
+    const accountMap = await loadModelAccounts();
+    let checked = 0;
+    let flagged = 0;
+    
+    // Check all photos in v1 vault mappings
+    for (const [promoter, targets] of Object.entries(vaultMappings)) {
+      const accountId = accountMap[promoter];
+      if (!accountId) continue;
+      
+      for (const [target, vaultId] of Object.entries(targets)) {
+        if (!vaultId || typeof vaultId !== 'string') continue;
+        
+        const result = await checkPromoPhotoQuality(vaultId, target, accountId);
+        checked++;
+        if (result) flagged++;
+        
+        // Rate limit
+        await new Promise(r => setTimeout(r, 2000));
+      }
+    }
+    
+    res.json({
+      ok: true,
+      checked,
+      flagged,
+      message: `Checked ${checked} photos, flagged ${flagged} for quality issues`
+    });
+  } catch (error) {
+    res.status(500).json({ error: error.message });
+  }
+});
+
+// Remove a photo from flagged list (false positive)
+app.delete('/promo-photos/unflag/:vaultId', requireApiKey, async (req, res) => {
+  const { vaultId } = req.params;
+  
+  if (promoPhotoQuality.flaggedPhotos.has(vaultId)) {
+    const flagData = promoPhotoQuality.flaggedPhotos.get(vaultId);
+    promoPhotoQuality.flaggedPhotos.delete(vaultId);
+    promoPhotoQuality.totalFlagged--;
+    
+    // Persist changes
+    await redis.set('s4s:promo-photo-quality', {
+      flaggedPhotos: Object.fromEntries(promoPhotoQuality.flaggedPhotos),
+      checkedPhotos: [...promoPhotoQuality.checkedPhotos],
+      totalChecked: promoPhotoQuality.totalChecked,
+      totalFlagged: promoPhotoQuality.totalFlagged
+    });
+    
+    res.json({
+      ok: true,
+      message: `Removed @${flagData.username} photo from flagged list`,
+      vaultId
+    });
+  } else {
+    res.status(404).json({ error: 'Photo not found in flagged list' });
+  }
 });
 
 app.post('/mass-dm/run', async (req, res) => {
@@ -5291,6 +6176,143 @@ app.get('/api-stats', (req, res) => {
   });
 });
 
+// Health Dashboard endpoint - aggregates all operational data
+app.get('/health-stats', requireApiKey, async (req, res) => {
+  try {
+    // Calculate daily API credit usage (estimate based on call counters)
+    const dailyCreditsUsed = apiCallStats.rotation + apiCallStats.deletes + apiCallStats.massDm + 
+                           apiCallStats.uploads + apiCallStats.other;
+    
+    // Get models with issues (circuit breaker trips, 401 errors)
+    const modelsWithIssues = [];
+    for (const [accountId, breaker] of Object.entries(perAccountCircuitBreaker)) {
+      if (breaker.consecutiveFailures >= DELETE_CIRCUIT_BREAKER.threshold) {
+        const username = accountIdToUsername[accountId] || 'unknown';
+        modelsWithIssues.push({
+          username,
+          accountId,
+          issue: `Circuit breaker tripped (${breaker.consecutiveFailures} failures)`,
+          lastFailure: breaker.lastFailure?.ts || null,
+          skippedSince: breaker.skippedSince || null
+        });
+      }
+    }
+
+    // Add 401 skipped accounts
+    for (const accountId of skipAccounts) {
+      if (!perAccountCircuitBreaker[accountId]) {
+        const username = accountIdToUsername[accountId] || 'unknown';
+        modelsWithIssues.push({
+          username,
+          accountId,
+          issue: 'Session expired (401)',
+          skippedSince: new Date().toISOString() // approximate
+        });
+      }
+    }
+
+    // Mass DM stats
+    const massDmData = await redis.get('s4s:mass-dm-schedule');
+    const massDmSentLog = await redis.get('s4s:mass-dm-sent') || [];
+    let massDmSent = 0, massDmPending = 0, massDmFailed = 0, massDmTotal = 0;
+    if (massDmData && massDmData.schedule) {
+      for (const entries of Object.values(massDmData.schedule)) {
+        for (const e of entries) {
+          massDmTotal++;
+          if (e.executed && !e.failed) massDmSent++;
+          else if (e.failed) massDmFailed++;
+          else massDmPending++;
+        }
+      }
+    }
+    const massDmLastSent = massDmSentLog.length > 0 ? massDmSentLog[massDmSentLog.length - 1].sentAt : null;
+
+    // Ghost tag success rate
+    const totalTags = rotationState.stats.totalTags || 0;
+    const totalDeletes = rotationState.stats.totalDeletes || 0;
+    const totalDeleteFailures = rotationState.stats.totalDeleteFailures || 0;
+    const ghostTagSuccessRate = totalTags > 0 ? ((totalDeletes / totalTags) * 100) : 100;
+
+    // Pinned posts stats
+    const pinnedState = await getPinnedState();
+    const pinnedEnabled = await redis.get('s4s:pinned-enabled');
+
+    // Rotation status
+    const pending = await getPendingDeletes();
+
+    const healthStats = {
+      apiCreditsUsedToday: dailyCreditsUsed,
+      apiCreditsTotal: 100000, // OFAPI monthly limit
+      modelsWithIssues,
+      massDm: {
+        todaySent: massDmSent,
+        todayTotal: massDmTotal,
+        todayPending: massDmPending,
+        todayFailed: massDmFailed,
+        lastSent: massDmLastSent
+      },
+      ghostTags: {
+        successRate: Math.round(ghostTagSuccessRate * 10) / 10,
+        tagsCreated: totalTags,
+        deletesConfirmed: totalDeletes,
+        deletesFailed: totalDeleteFailures
+      },
+      smartRotation: {
+        totalConversions: conversionData.totalConversions,
+        totalTrackedTags: conversionData.totalTags,
+        overallConversionRate: conversionData.totalTags > 0 ? 
+          Math.round((conversionData.totalConversions / conversionData.totalTags) * 1000) / 10 : 0, // percentage * 10 for precision
+        topPerformers: Object.entries(conversionData.promoters)
+          .map(([promoter, targets]) => {
+            const totalTags = Object.values(targets).reduce((sum, t) => sum + t.tags, 0);
+            const totalConversions = Object.values(targets).reduce((sum, t) => sum + t.follows + t.subs, 0);
+            const avgRate = totalTags > 0 ? totalConversions / totalTags : 0;
+            return { promoter, totalTags, totalConversions, avgConversionRate: avgRate };
+          })
+          .filter(p => p.totalTags >= 10) // Only include promoters with enough data
+          .sort((a, b) => b.avgConversionRate - a.avgConversionRate)
+          .slice(0, 5), // Top 5 performers
+        lastUpdated: conversionData.lastUpdated
+      },
+      deadModelDetection: {
+        flaggedModels: [...deadModelDetection.flaggedModels],
+        totalFlagged: deadModelDetection.flaggedModels.size,
+        lastSnapshotDate: deadModelDetection.lastSnapshotDate,
+        snapshotDays: Object.keys(deadModelDetection.dailySnapshots).length,
+        trackingStarted: deadModelDetection.trackingStarted
+      },
+      promoPhotoQuality: {
+        totalChecked: promoPhotoQuality.totalChecked,
+        totalFlagged: promoPhotoQuality.totalFlagged,
+        flaggedPhotos: [...promoPhotoQuality.flaggedPhotos.values()].map(p => ({
+          username: p.username,
+          vaultId: p.vaultId,
+          issues: p.issues,
+          resolution: p.resolution,
+          flaggedAt: p.flaggedAt
+        }))
+      },
+      pinnedPosts: {
+        enabled: pinnedEnabled !== false,
+        activePosts: (pinnedState.activePosts || []).length,
+        featuredGirls: pinnedState.featuredGirls || [],
+        lastRun: pinnedState.lastRun
+      },
+      rotation: {
+        isRunning,
+        modelsActive: Object.keys(rotationState.dailySchedule).length,
+        pendingDeletes: pending.length
+      },
+      lastUpdated: new Date().toISOString()
+    };
+
+    res.json(healthStats);
+  } catch (error) {
+    console.error('Error generating health stats:', error);
+    res.status(500).json({ error: error.message });
+  }
+});
+
 // === BIANCA WOODS HOURLY BUMP SYSTEM ===
 
 const BIANCA_ACCOUNT_ID = 'acct_54e3119e77da4429b6537f7dd2883a05';
@@ -6088,6 +7110,91 @@ app.post('/dispatch/reset', async (req, res) => {
   }
 });
 
+// === SMART ROTATION CONVERSION TRACKING ===
+
+// Track a conversion manually
+app.post('/conversion/track', requireApiKey, async (req, res) => {
+  const { promoter, target, type } = req.body;
+  
+  if (!promoter || !target || !['follow', 'sub'].includes(type)) {
+    return res.status(400).json({ error: 'promoter, target, and type (follow|sub) required' });
+  }
+  
+  try {
+    await trackConversion(promoter, target, type);
+    
+    // Return updated stats for the promoter-target pair
+    const data = conversionData.promoters[promoter]?.[target];
+    res.json({
+      ok: true,
+      promoter,
+      target,
+      type,
+      stats: data || null,
+      message: `${type} conversion tracked for ${promoter} → @${target}`
+    });
+  } catch (error) {
+    res.status(500).json({ error: error.message });
+  }
+});
+
+// Get conversion data for a specific promoter or all data
+app.get('/conversion/stats/:promoter?', async (req, res) => {
+  const { promoter } = req.params;
+  
+  if (promoter) {
+    const data = conversionData.promoters[promoter] || {};
+    const totalTags = Object.values(data).reduce((sum, t) => sum + t.tags, 0);
+    const totalConversions = Object.values(data).reduce((sum, t) => sum + t.follows + t.subs, 0);
+    
+    res.json({
+      promoter,
+      targets: data,
+      summary: {
+        totalTags,
+        totalConversions,
+        overallRate: totalTags > 0 ? totalConversions / totalTags : 0
+      }
+    });
+  } else {
+    // Return global stats
+    res.json({
+      global: {
+        totalConversions: conversionData.totalConversions,
+        totalTags: conversionData.totalTags,
+        lastUpdated: conversionData.lastUpdated
+      },
+      promoters: Object.keys(conversionData.promoters).length,
+      topPerformers: Object.entries(conversionData.promoters)
+        .map(([p, targets]) => {
+          const totalTags = Object.values(targets).reduce((sum, t) => sum + t.tags, 0);
+          const totalConversions = Object.values(targets).reduce((sum, t) => sum + t.follows + t.subs, 0);
+          return {
+            promoter: p,
+            totalTags,
+            totalConversions,
+            conversionRate: totalTags > 0 ? totalConversions / totalTags : 0
+          };
+        })
+        .filter(p => p.totalTags >= 5)
+        .sort((a, b) => b.conversionRate - a.conversionRate)
+        .slice(0, 10)
+    });
+  }
+});
+
+// Reset conversion data (for testing)
+app.post('/conversion/reset', requireApiKey, async (req, res) => {
+  conversionData = {
+    promoters: {},
+    lastUpdated: Date.now(),
+    totalTags: 0,
+    totalConversions: 0
+  };
+  await redis.set('s4s:conversion-data', conversionData);
+  res.json({ ok: true, message: 'Conversion data reset' });
+});
+
 // === OPENCLAW TUNNEL CONFIG ===
 app.post('/openclaw/tunnel', async (req, res) => {
   const { url, token } = req.body;
@@ -6181,6 +7288,30 @@ app.listen(PORT, async () => {
   await loadExcludeListIds();
   await ensureAllExcludeLists();
   
+  // Load conversion data for smart rotation
+  await loadConversionData();
+  
+  // Load dead model detection data
+  await loadDeadModelData();
+  
+  // Load credit budget tracking data
+  await loadCreditBudgetData();
+  
+  // Load promo photo quality data
+  await loadPromoPhotoQualityData();
+  
+  // Load mass DM timing configuration
+  try {
+    const timingConfig = await redis.get('s4s:mass-dm-timing-config');
+    if (timingConfig) {
+      MASS_DM_CONFIG = { ...MASS_DM_CONFIG, ...timingConfig };
+      MASS_DM_WINDOWS_UTC = generateMassDmWindows();
+      console.log(`📨 Loaded mass DM timing config: ${MASS_DM_WINDOWS_UTC.length} windows (${MASS_DM_WINDOWS_UTC.filter(w => w.type === 'peak').length} peak)`);
+    }
+  } catch (e) {
+    console.error('Failed to load mass DM timing config:', e.message);
+  }
+  
   // Run startup recovery (non-blocking so health check passes)
   startupRecovery().catch(e => console.error('❌ Startup recovery error:', e.message));
 
@@ -6206,22 +7337,39 @@ app.listen(PORT, async () => {
     "4083927385", "4083927380", "4083927378", "4083927375"
   ];
   const BIANCA_BUMP_CAPTIONS = [
+    // Mirror selfie energy — she just took this pic and wants to show someone
+    'just took this in the mirror 🙈 do u like it?',
+    'do i look cute? be honest 🥺',
+    'just got out of the shower and had to take this 📸',
+    'this outfit or should i take it off? 😏',
+    'trying on new clothes... thoughts? 💕',
+    'felt pretty today 🥺 had to share with u',
+    'ok but am i hot or am i hot 😏🔥',
+    'mirror selfie bc i look good rn and u deserve to see 💕',
+    'getting ready and thought of u 📸',
+    'this is what u been missing babe 🙈',
+    // Attention/engagement hooks
+    'hey u... i have something to show u 😏',
+    'ok be honest... rate me 1-10 🥺',
+    'bet u cant guess what im wearing under this 😏',
+    'took this just for u... dont tell anyone 🤫',
+    'im bored and look too good to waste it 😅 come talk to me',
+    'are u even gonna look at this or should i send it to someone else 😤💕',
+    'u up? i need attention 🥺',
+    'i look so good rn its criminal 😏 had to show u',
+    'guess what i just did 🙈🔥',
+    'stop scrolling and look at me 😤💕',
+    // Playful/flirty
     'heyyy u 💕 been thinking about u',
-    'bored and looking cute rn 😏 wanna see?',
     'miss talking to u 🥺',
-    'just took this for u 📸',
     'are u ignoring me 😤💕',
-    'pssst 😘',
+    'pssst 😘 come here',
     'hiiii remember me? 🙈',
-    'heyy how are u 😊',
-    'hey babe what are u up to rn',
-    'hiii 💕',
-    'heyyy whatcha doing 😊',
-    'hey handsome 😏',
-    'bored rn... entertain me? 😊',
-    'heyy stranger 💕',
-    'thinking about u rn 😊',
-    'hey cutie wyd 💕',
+    'bored rn... come keep me company? 😊',
+    'hey stranger... long time no talk 💕',
+    'just laying in bed thinking about u 🥺',
+    'someone come tell me im pretty 🥺',
+    'wish u were here rn 💕',
   ];
   const BIANCA_BUMP_ACCOUNT = 'acct_54e3119e77da4429b6537f7dd2883a05';
   const BIANCA_BUMP_EXCLUDE_LISTS = [1231455148, 1232110158, 1258116798, 1232588865, 1254929574, 1265115686];
